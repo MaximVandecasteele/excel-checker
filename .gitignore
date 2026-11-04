@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Local editor and operating-system files
+.idea/
+.vscode/
+.DS_Store
+
+# Excel workbooks and generated reports may contain student data
+*.xlsx
+*.xlsm
+reports/
+Excel_Checker_rapporten/
