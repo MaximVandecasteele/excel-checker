@@ -1856,18 +1856,32 @@ def compare_workbooks(reference_path: Path, student_path: Path) -> ComparisonRes
 
     reference_names = reference.sheetnames
     student_names = student.sheetnames
-    for name in reference_names:
-        if name not in student_names:
-            _add_difference(differences, name, "Werkblad", "aanwezig", "ontbreekt")
-    for name in student_names:
-        if name not in reference_names:
-            _add_difference(differences, name, "Werkblad", "ontbreekt", "extra werkblad")
-    if reference_names != student_names:
-        _add_difference(differences, "Werkmap", "Volgorde werkbladen", reference_names, student_names)
+    for index in range(max(len(reference_names), len(student_names))):
+        if index >= len(reference_names):
+            name = student_names[index]
+            _add_difference(
+                differences, name, f"Werkblad op positie {index + 1}",
+                "ontbreekt", name,
+            )
+            continue
+        if index >= len(student_names):
+            name = reference_names[index]
+            _add_difference(
+                differences, name, f"Werkblad op positie {index + 1}",
+                name, "ontbreekt",
+            )
+            continue
 
-    for name in (sheet for sheet in reference_names if sheet in student_names):
-        expected = reference[name]
-        actual = student[name]
+        reference_name = reference_names[index]
+        student_name = student_names[index]
+        name = student_name
+        if reference_name != student_name:
+            _add_difference(
+                differences, name, "Naam werkblad", reference_name, student_name,
+            )
+
+        expected = reference[reference_name]
+        actual = student[student_name]
 
         for property_name, expected_value, actual_value in (
             ("Zichtbaarheid", expected.sheet_state, actual.sheet_state),

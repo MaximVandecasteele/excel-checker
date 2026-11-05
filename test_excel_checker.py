@@ -206,6 +206,37 @@ class WorkbookComparisonTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    def test_renamed_worksheet_is_compared_by_position(self):
+        for path, third_sheet_name, third_sheet_value in (
+            (self.reference, "Formules", "model"),
+            (self.student, "Formules leerling", "leerling"),
+        ):
+            workbook = Workbook()
+            workbook.active.title = "Start"
+            workbook.create_sheet("Data")
+            third_sheet = workbook.create_sheet(third_sheet_name)
+            third_sheet["A1"] = third_sheet_value
+            workbook.save(path)
+
+        result = compare_workbooks(self.reference, self.student)
+
+        renamed_sheet_difference = next(
+            item for item in result.differences if item.item == "Naam werkblad"
+        )
+        self.assertEqual(renamed_sheet_difference.sheet, "Formules leerling")
+        self.assertEqual(renamed_sheet_difference.expected, "'Formules'")
+        self.assertEqual(renamed_sheet_difference.actual, "'Formules leerling'")
+        self.assertTrue(any(
+            item.sheet == "Formules leerling"
+            and item.item == "A1 inhoud/formule"
+            and "'model'" in item.expected
+            and "'leerling'" in item.actual
+            for item in result.differences
+        ))
+        self.assertFalse(any(
+            item.item == "Volgorde werkbladen" for item in result.differences
+        ))
+
     def _workbook_with_chart(self, path, chart_title="Verkoop", anchor="D1"):
         workbook = Workbook()
         sheet = workbook.active
