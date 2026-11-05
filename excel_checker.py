@@ -5,6 +5,7 @@ import re
 import xml.etree.ElementTree as ET
 from collections import Counter
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,7 @@ from openpyxl.utils import (
     range_boundaries,
 )
 from openpyxl.formula.translate import Translator
+from openpyxl.styles.numbers import BUILTIN_FORMATS
 
 
 @dataclass(frozen=True)
@@ -23,6 +25,7 @@ class Difference:
     item: str
     expected: str
     actual: str
+    category: str | None = None
 
 
 @dataclass
@@ -36,7 +39,118 @@ class ComparisonResult:
         return not self.differences and self.error is None
 
 
-def _color(color: Any) -> Any:
+@lru_cache(maxsize=32)
+def _theme_color_values(theme: bytes | None) -> tuple[str | None, ...]:
+    if not theme:
+        return ()
+    root = ET.fromstring(theme)
+    scheme = root.find(".//{*}clrScheme")
+    if scheme is None:
+        return ()
+    colors = []
+    for entry in scheme:
+        color = next(iter(entry), None)
+        if color is None:
+            colors.append(None)
+        elif color.tag.rsplit("}", 1)[-1] == "srgbClr":
+            colors.append(color.get("val"))
+        else:
+            colors.append(color.get("lastClr"))
+    return tuple(colors)
+
+
+def _tinted_rgb(rgb: str, tint: float) -> str:
+    rgb = rgb[-6:]
+    if tint == 0:
+        return rgb.upper()
+
+    hls_max = 240
+
+    def rounded_division(numerator: int, denominator: int) -> int:
+        if numerator < 0:
+            return -((-numerator + denominator // 2) // denominator)
+        return (numerator + denominator // 2) // denominator
+
+    red, green, blue = (
+        int(rgb[index:index + 2], 16)
+        for index in (0, 2, 4)
+    )
+    maximum = max(red, green, blue)
+    minimum = min(red, green, blue)
+    delta = maximum - minimum
+    total = maximum + minimum
+    lightness = (total * hls_max + 255) // (2 * 255)
+    if delta == 0:
+        hue, saturation = 160, 0
+    else:
+        saturation_denominator = (
+            total if lightness <= hls_max // 2 else 2 * 255 - total
+        )
+        saturation = (
+            delta * hls_max + saturation_denominator // 2
+        ) // saturation_denominator
+
+        def hue_distance(channel: int) -> int:
+            return (
+                (maximum - channel) * (hls_max // 6) + delta // 2
+            ) // delta
+
+        if red == maximum:
+            hue = hue_distance(blue) - hue_distance(green)
+        elif green == maximum:
+            hue = hls_max // 3 + hue_distance(red) - hue_distance(blue)
+        else:
+            hue = hls_max * 2 // 3 + hue_distance(green) - hue_distance(red)
+        hue %= hls_max
+
+    tint_millis = int(tint * 1000 + 0.5) if tint >= 0 else -int(-tint * 1000 + 0.5)
+    tint_millis = max(-1000, min(1000, tint_millis))
+    if tint_millis > 0:
+        lightness += ((hls_max - lightness) * tint_millis) // 1000
+    elif tint_millis < 0:
+        lightness = (lightness * (1000 + tint_millis)) // 1000
+
+    if saturation == 0:
+        channels = (rounded_division(lightness * 255, hls_max),) * 3
+    else:
+        if lightness <= hls_max / 2:
+            high = rounded_division(
+                lightness * (hls_max + saturation), hls_max
+            )
+        else:
+            high = lightness + saturation - rounded_division(
+                lightness * saturation, hls_max
+            )
+        low = 2 * lightness - high
+
+        def hue_channel(position: int) -> int:
+            position %= hls_max
+            if position < hls_max // 6:
+                return low + rounded_division(
+                    (high - low) * position, hls_max // 6
+                )
+            if position < hls_max // 2:
+                return high
+            if position < hls_max * 2 // 3:
+                return low + rounded_division(
+                    (high - low) * (hls_max * 2 // 3 - position),
+                    hls_max // 6,
+                )
+            return low
+
+        channels = (
+            hue_channel(hue + hls_max // 3),
+            hue_channel(hue),
+            hue_channel(hue - hls_max // 3),
+        )
+        channels = tuple(
+            rounded_division(channel * 255, hls_max)
+            for channel in channels
+        )
+    return "".join(f"{channel:02X}" for channel in channels)
+
+
+def _color(color: Any, theme: bytes | None = None) -> Any:
     if color is None:
         return None
     if color.type == "rgb":
@@ -49,13 +163,21 @@ def _color(color: Any) -> Any:
         value = color.auto
     else:
         value = None
-    return (color.type, value, color.tint)
+    signature = (color.type, value, color.tint)
+    if color.type == "theme":
+        theme_colors = _theme_color_values(theme)
+        theme_index = color.theme
+        if theme_index is not None and theme_index < len(theme_colors):
+            rgb = theme_colors[theme_index]
+            if rgb:
+                return signature + (_tinted_rgb(rgb, color.tint),)
+    return signature
 
 
-def _side(side: Any) -> Any:
+def _side(side: Any, theme: bytes | None = None) -> Any:
     if side is None:
         return None
-    color = _color(side.color)
+    color = _color(side.color, theme)
     if side.style is None and color is None:
         return None
     return (
@@ -87,7 +209,61 @@ def _normalize_number_format(number_format: str) -> str:
     return "".join(normalized)
 
 
+def _number_format_signature(cell: Any) -> tuple[str, str | None]:
+    number_format = _normalize_number_format(cell.number_format)
+    builtin_id = cell._style.numFmtId if cell.has_style else 0
+    builtin_names = {
+        0: "standaard",
+        1: "getal",
+        2: "getal",
+        3: "getal",
+        4: "getal",
+        5: "valuta",
+        6: "valuta",
+        7: "valuta",
+        8: "valuta",
+        9: "percentage",
+        10: "percentage",
+        11: "wetenschappelijk",
+        12: "breuk",
+        13: "breuk",
+        14: "datum",
+        15: "datum",
+        16: "datum",
+        17: "datum",
+        18: "tijd",
+        19: "tijd",
+        20: "tijd",
+        21: "tijd",
+        22: "datum en tijd",
+        37: "getal",
+        38: "getal",
+        39: "getal",
+        40: "getal",
+        41: "financieel",
+        42: "financieel",
+        43: "financieel",
+        44: "financieel",
+        45: "tijd",
+        46: "tijd",
+        47: "tijd",
+        48: "wetenschappelijk",
+        49: "tekst",
+    }
+    if BUILTIN_FORMATS.get(builtin_id) == cell.number_format:
+        return number_format, builtin_names.get(builtin_id)
+    localized_defaults = {
+        '_ "€" * #,##0.00_ ;_ "€" * -#,##0.00_ ;_ "€" * "-"??_ ;_ @_': "financieel",
+        '"€" #,##0.00': "valuta",
+    }
+    localized_name = localized_defaults.get(number_format.strip())
+    if localized_name:
+        return number_format, localized_name
+    return number_format, None
+
+
 def _style(cell: Any) -> dict[str, Any]:
+    theme = cell.parent.parent.loaded_theme
     font = cell.font
     fill = cell.fill
     alignment = cell.alignment
@@ -96,16 +272,17 @@ def _style(cell: Any) -> dict[str, Any]:
     return {
         "lettertype": (
             font.name, font.sz, font.b, font.i, font.u, font.strike,
-            _color(font.color), font.vertAlign, font.outline, font.shadow,
+            _color(font.color, theme), font.vertAlign, font.outline, font.shadow,
             font.charset, font.family, font.scheme,
         ),
         "opvulling": (
-            fill.fill_type, _color(fill.fgColor), _color(fill.bgColor),
+            fill.fill_type, _color(fill.fgColor, theme), _color(fill.bgColor, theme),
             fill.patternType,
         ),
         "rand": (
-            _side(border.left), _side(border.right), _side(border.top),
-            _side(border.bottom), _side(border.diagonal),
+            _side(border.left, theme), _side(border.right, theme),
+            _side(border.top, theme), _side(border.bottom, theme),
+            _side(border.diagonal, theme),
             border.diagonalUp, border.diagonalDown, border.outline,
         ),
         "uitlijning": (
@@ -114,7 +291,7 @@ def _style(cell: Any) -> dict[str, Any]:
             alignment.relativeIndent, alignment.justifyLastLine,
             alignment.readingOrder,
         ),
-        "getalnotatie": _normalize_number_format(cell.number_format),
+        "getalnotatie": _number_format_signature(cell),
         "celbeveiliging": (protection.locked, protection.hidden),
     }
 
@@ -198,6 +375,7 @@ def _coalesce_formula_differences(
                 f"{first}:{last} inhoud/formule ({len(available)} cellen; doorgevoerde fout in {direction})",
                 expected_formula,
                 actual_formula,
+                "Functies / berekeningen",
             ))
             consumed.update(available)
 
@@ -211,6 +389,7 @@ def _coalesce_formula_differences(
             f"{cell} inhoud/formule",
             expected_formula,
             actual_formula,
+            "Functies / berekeningen",
         ))
     return grouped
 
@@ -223,8 +402,10 @@ def _short_value(value: Any, limit: int = 70) -> str:
 def _format_style_color(color: Any) -> str:
     if color is None:
         return "geen kleur"
-    color_type, value, tint = color
-    if color_type == "theme":
+    color_type, value, tint = color[:3]
+    if color_type == "theme" and len(color) > 3:
+        description = f"#{color[3]}"
+    elif color_type == "theme":
         description = f"themakleur {value}"
     elif color_type == "rgb" and isinstance(value, str):
         description = f"#{value[-6:]}"
@@ -232,12 +413,205 @@ def _format_style_color(color: Any) -> str:
         description = f"geïndexeerde kleur {value}"
     else:
         description = str(value or color_type)
-    if tint:
+    if tint and not (color_type == "theme" and len(color) > 3):
         description += f" (tint {tint:.2f})"
     return description
 
 
-def _format_style_summary(changes: dict[str, tuple[Any, Any]], side: int) -> str:
+def _format_font_summary(value: tuple[Any, ...], other: tuple[Any, ...]) -> str:
+    parts = []
+    if value[0] != other[0]:
+        parts.append(value[0] or "standaardlettertype")
+    if value[1] != other[1]:
+        size = value[1]
+        formatted_size = f"{size:g}" if isinstance(size, (int, float)) else size
+        parts.append(
+            f"{formatted_size} pt" if size is not None else "standaardgrootte"
+        )
+
+    for index, positive, negative in (
+        (2, "vet", "normaal"),
+        (3, "cursief", "recht"),
+        (5, "doorgestreept", "niet doorgestreept"),
+        (8, "contour", "geen contour"),
+        (9, "schaduw", "geen schaduw"),
+    ):
+        if value[index] != other[index]:
+            parts.append(positive if value[index] else negative)
+
+    if value[4] != other[4]:
+        underline_names = {
+            None: "niet onderstreept",
+            "single": "enkel onderstreept",
+            "double": "dubbel onderstreept",
+            "singleAccounting": "enkel onderstreept (boekhouding)",
+            "doubleAccounting": "dubbel onderstreept (boekhouding)",
+        }
+        parts.append(underline_names.get(value[4], f"onderstreept ({value[4]})"))
+
+    if value[6] != other[6]:
+        parts.append(
+            "standaardkleur"
+            if value[6] is None
+            else _format_style_color(value[6])
+        )
+    if value[7] != other[7]:
+        vertical_names = {
+            None: "normale positie",
+            "baseline": "normale positie",
+            "superscript": "superscript",
+            "subscript": "subscript",
+        }
+        parts.append(vertical_names.get(value[7], str(value[7])))
+
+    if value[10] != other[10]:
+        parts.append(f"tekenverzameling {value[10] or 'standaard'}")
+    if value[11] != other[11]:
+        family_names = {
+            0: "standaard",
+            1: "modern",
+            2: "roman",
+            3: "swiss",
+            4: "script",
+            5: "decoratief",
+        }
+        parts.append(f"lettertypefamilie {family_names.get(value[11], value[11])}")
+    if value[12] != other[12]:
+        scheme_names = {
+            None: "geen themaschema",
+            "major": "themakop",
+            "minor": "themalichaam",
+        }
+        parts.append(scheme_names.get(value[12], f"themaschema {value[12]}"))
+    return ", ".join(parts) or "lettertype-instelling gewijzigd"
+
+
+def _format_border_summary(value: tuple[Any, ...], other: tuple[Any, ...]) -> str:
+    side_names = ("linkerrand", "rechterrand", "bovenrand", "onderrand", "diagonale rand")
+    style_names = {
+        "hair": "haarlijn",
+        "dotted": "gestippeld",
+        "dashDot": "streep-punt",
+        "dashDotDot": "streep-punt-punt",
+        "dashed": "gestreept",
+        "slantDashDot": "schuin streep-punt",
+        "mediumDashDot": "middelmatig streep-punt",
+        "mediumDashDotDot": "middelmatig streep-punt-punt",
+        "mediumDashed": "middelmatig gestreept",
+        "thin": "dun",
+        "medium": "middelmatig",
+        "thick": "dik",
+        "double": "dubbel",
+    }
+    parts = []
+    for index, name in enumerate(side_names):
+        current_side = value[index]
+        other_side = other[index]
+        if current_side == other_side:
+            continue
+        if current_side is None or other_side is None:
+            if current_side is None:
+                description = "geen"
+                parts.append(f"{name}: {description}")
+            else:
+                style, color = current_side
+                if style:
+                    parts.append(
+                        f"{name} stijl: {style_names.get(style, style)}"
+                    )
+                if color:
+                    parts.append(
+                        f"{name} kleur: {_format_style_color(color)}"
+                    )
+                if not style and not color:
+                    parts.append(f"{name}: geen")
+            continue
+
+        style, color = current_side
+        other_style, other_color = other_side
+        if style != other_style:
+            parts.append(f"{name} stijl: {style_names.get(style, style) if style else 'geen'}")
+        if color != other_color:
+            parts.append(
+                f"{name} kleur: "
+                f"{_format_style_color(color) if color else 'geen kleur'}"
+            )
+
+    flag_names = (
+        (5, "diagonale rand omhoog"),
+        (6, "diagonale rand omlaag"),
+        (7, "omlijning"),
+    )
+    for index, name in flag_names:
+        if value[index] != other[index]:
+            parts.append(name if value[index] else f"geen {name}")
+    return "\n".join(parts) or "randinstelling gewijzigd"
+
+
+def _format_alignment_summary(
+    value: tuple[Any, ...],
+    other: tuple[Any, ...],
+) -> str:
+    parts = []
+    horizontal_names = {
+        "general": "standaard",
+        "left": "links",
+        "center": "centreren",
+        "right": "rechts",
+        "fill": "opvullen",
+        "justify": "uitvullen",
+        "centerContinuous": "doorlopend centreren",
+        "distributed": "gespreid",
+    }
+    vertical_names = {
+        "bottom": "onderaan",
+        "center": "midden",
+        "top": "bovenaan",
+        "justify": "uitvullen",
+        "distributed": "gespreid",
+    }
+    if value[0] != other[0]:
+        parts.append(
+            f"horizontaal: "
+            f"{horizontal_names.get(value[0], value[0]) if value[0] else 'standaard'}"
+        )
+    if value[1] != other[1]:
+        parts.append(
+            f"verticaal: {vertical_names.get(value[1], value[1]) if value[1] else 'standaard'}"
+        )
+    if value[2] != other[2]:
+        parts.append(f"draaiing: {value[2]}°")
+    if value[3] != other[3]:
+        parts.append("tekstterugloop" if value[3] else "geen tekstterugloop")
+    if value[4] != other[4]:
+        parts.append("passend maken" if value[4] else "niet passend gemaakt")
+    if value[5] != other[5]:
+        parts.append(f"inspringing: {value[5]:g}" if value[5] else "geen inspringing")
+    if value[6] != other[6]:
+        parts.append(
+            f"relatieve inspringing: {value[6]:g}"
+            if value[6]
+            else "geen relatieve inspringing"
+        )
+    if value[7] != other[7]:
+        parts.append("laatste regel uitgevuld" if value[7] else "laatste regel niet uitgevuld")
+    if value[8] != other[8]:
+        reading_order_names = {
+            0: "contextafhankelijk",
+            1: "links naar rechts",
+            2: "rechts naar links",
+        }
+        parts.append(
+            f"leesrichting: {reading_order_names.get(value[8], value[8])}"
+        )
+    return "\n".join(parts) or "uitlijningsinstelling gewijzigd"
+
+
+def _format_style_summary(
+    changes: dict[str, tuple[Any, Any]],
+    side: int,
+    counterparts: dict[str, tuple[Any, Any]] | None = None,
+) -> str:
     summaries = []
     for category, values in changes.items():
         value = values[side]
@@ -248,6 +622,30 @@ def _format_style_summary(changes: dict[str, tuple[Any, Any]], side: int) -> str
             if color:
                 description += f", {_format_style_color(color)}"
             summaries.append(description)
+        elif category == "getalnotatie":
+            number_format, builtin_name = value
+            counterpart = (counterparts or {}).get(category)
+            other_name = counterpart[1 - side][1] if counterpart else None
+            other_format = counterpart[1 - side][0] if counterpart else None
+            if builtin_name and builtin_name == other_name and number_format != other_format:
+                description = f"{builtin_name} : {number_format}"
+            elif builtin_name:
+                description = builtin_name
+            else:
+                description = _short_value(number_format, 120)
+            summaries.append(f"getalnotatie: {description}")
+        elif category == "lettertype":
+            counterpart = (counterparts or {}).get(category)
+            other_value = counterpart[1 - side] if counterpart else value
+            summaries.append(f"lettertype: {_format_font_summary(value, other_value)}")
+        elif category == "rand":
+            counterpart = (counterparts or {}).get(category)
+            other_value = counterpart[1 - side] if counterpart else value
+            summaries.append(_format_border_summary(value, other_value))
+        elif category == "uitlijning":
+            counterpart = (counterparts or {}).get(category)
+            other_value = counterpart[1 - side] if counterpart else value
+            summaries.append(_format_alignment_summary(value, other_value))
         else:
             summaries.append(f"{category}: {_short_value(value, 120)}")
     return "; ".join(summaries)
@@ -283,6 +681,7 @@ def _coalesce_cell_differences(
                 _add_difference(
                     differences, sheet, f"{coordinate} inhoud/formule",
                     expected, actual,
+                    "Invoer data (inhoud)",
                 )
             continue
 
@@ -321,8 +720,12 @@ def _coalesce_style_differences(
 ) -> list[Difference]:
     by_signature: dict[tuple[str, str, str], list[tuple[int, int]]] = {}
     signature_values: dict[tuple[str, str, str], tuple[Any, Any]] = {}
+    border_changes: dict[tuple[int, int], tuple[Any, Any]] = {}
     for coordinate, changes in style_changes.items():
         for category, (expected, actual) in changes.items():
+            if category == "rand":
+                border_changes[coordinate] = expected, actual
+                continue
             signature = (category, repr(expected), repr(actual))
             by_signature.setdefault(signature, []).append(coordinate)
             signature_values[signature] = (expected, actual)
@@ -375,10 +778,141 @@ def _coalesce_style_differences(
             sheet,
             f"Opmaak: {category} ({len(coordinates)} {count_label}; "
             f"bereiken: {', '.join(visible_ranges)})",
-            _format_style_summary({category: (expected, actual)}, 0),
-            _format_style_summary({category: (expected, actual)}, 1),
+            _format_style_summary(
+                {category: (expected, actual)},
+                0,
+                {category: (expected, actual)},
+            ),
+            _format_style_summary(
+                {category: (expected, actual)},
+                1,
+                {category: (expected, actual)},
+            ),
+            "Opmaak",
+        ))
+
+    remaining = set(border_changes)
+    while remaining:
+        seed = min(remaining)
+        remaining.remove(seed)
+        component = {seed}
+        pending = [seed]
+        while pending:
+            row, column = pending.pop()
+            for neighbor in (
+                (row - 1, column), (row + 1, column),
+                (row, column - 1), (row, column + 1),
+            ):
+                if neighbor in remaining:
+                    remaining.remove(neighbor)
+                    component.add(neighbor)
+                    pending.append(neighbor)
+
+        min_row = min(row for row, _ in component)
+        max_row = max(row for row, _ in component)
+        min_column = min(column for _, column in component)
+        max_column = max(column for _, column in component)
+        first = f"{get_column_letter(min_column)}{min_row}"
+        last = f"{get_column_letter(max_column)}{max_row}"
+        range_label = first if first == last else f"{first}:{last}"
+
+        expected_summary = _format_border_range_summary(
+            [border_changes[coordinate] for coordinate in component],
+            0,
+        )
+        actual_summary = _format_border_range_summary(
+            [border_changes[coordinate] for coordinate in component],
+            1,
+        )
+        differences.append(Difference(
+            sheet,
+            f"Opmaak: rand in bereik {range_label}",
+            expected_summary,
+            actual_summary,
+            "Opmaak",
         ))
     return differences
+
+
+def _format_border_range_summary(
+    changes: list[tuple[tuple[Any, ...], tuple[Any, ...]]],
+    side: int,
+) -> str:
+    side_names = (
+        "linkerrand",
+        "rechterrand",
+        "bovenrand",
+        "onderrand",
+        "diagonale rand",
+    )
+    style_names = {
+        "hair": "haarlijn",
+        "dotted": "gestippeld",
+        "dashDot": "streep-punt",
+        "dashDotDot": "streep-punt-punt",
+        "dashed": "gestreept",
+        "slantDashDot": "schuin streep-punt",
+        "mediumDashDot": "middelmatig streep-punt",
+        "mediumDashDotDot": "middelmatig streep-punt-punt",
+        "mediumDashed": "middelmatig gestreept",
+        "thin": "dun",
+        "medium": "middelmatig",
+        "thick": "dik",
+        "double": "dubbel",
+    }
+
+    parts = []
+    for index, name in enumerate(side_names):
+        edge_changes = [
+            pair for pair in changes if pair[0][index] != pair[1][index]
+        ]
+        if not edge_changes:
+            continue
+        edge_values = [
+            pair[side][index] for pair in edge_changes
+        ]
+        if all(value is None for value in edge_values):
+            parts.append(f"{name}: geen")
+            continue
+        for value_index, label, formatter in (
+            (0, "stijl", lambda value: style_names.get(value, value) if value else "geen"),
+            (1, "kleur", lambda value: _format_style_color(value) if value else "geen kleur"),
+        ):
+            values = {
+                pair[side][index][value_index]
+                if pair[side][index] is not None
+                else None
+                for pair in edge_changes
+                if (
+                    pair[0][index][value_index]
+                    if pair[0][index] is not None
+                    else None
+                ) != (
+                    pair[1][index][value_index]
+                    if pair[1][index] is not None
+                    else None
+                )
+            }
+            if values:
+                parts.append(
+                    f"{name} {label}: "
+                    + ", ".join(formatter(value) for value in sorted(values, key=str))
+                )
+
+    for index, name in (
+        (5, "diagonale rand omhoog"),
+        (6, "diagonale rand omlaag"),
+        (7, "omlijning"),
+    ):
+        values = {
+            pair[side][index]
+            for pair in changes
+            if pair[0][index] != pair[1][index]
+        }
+        if values:
+            labels = ["aan" if value else "uit" for value in sorted(values)]
+            parts.append(f"{name}: {', '.join(labels)}")
+    return "\n".join(parts) or "geen"
 
 
 def _cell_annotations(cell: Any) -> tuple[Any, Any]:
@@ -773,6 +1307,98 @@ def _column_dimension_signatures(sheet: Any) -> dict[int, tuple[Any, ...]]:
     return signatures
 
 
+def _dimension_differences(
+    expected: dict[int, tuple[Any, ...]],
+    actual: dict[int, tuple[Any, ...]],
+    expected_default_size: float,
+    actual_default_size: float,
+    tolerance: float = 0.2,
+) -> tuple[dict[int, tuple[Any, ...]], dict[int, tuple[Any, ...]]]:
+    indices = expected.keys() | actual.keys()
+
+    def effective_size(
+        signature: tuple[Any, ...] | None,
+        default_size: float,
+    ) -> float:
+        if signature is None or signature[0] is None:
+            return default_size
+        return signature[0]
+
+    expected_sizes = {
+        index: effective_size(expected.get(index), expected_default_size)
+        for index in indices
+    }
+    actual_sizes = {
+        index: effective_size(actual.get(index), actual_default_size)
+        for index in indices
+    }
+    equal_model_dimensions: dict[float, list[int]] = {}
+    for index, size in expected_sizes.items():
+        equal_model_dimensions.setdefault(size, []).append(index)
+
+    inconsistent_groups = set()
+    for indices_in_group in equal_model_dimensions.values():
+        if len(indices_in_group) > 1 and len({
+            actual_sizes[index] for index in indices_in_group
+        }) > 1:
+            inconsistent_groups.update(indices_in_group)
+
+    expected_changes = {}
+    actual_changes = {}
+    for index in indices:
+        expected_size = expected_sizes[index]
+        actual_size = actual_sizes[index]
+        size_changed = (
+            abs(actual_size - expected_size) > abs(expected_size) * tolerance
+            if expected_size
+            else actual_size != expected_size
+        )
+        relation_changed = index in inconsistent_groups
+        size_changed = size_changed or relation_changed
+        expected_signature = expected.get(index)
+        actual_signature = actual.get(index)
+        expected_settings = expected_signature[1:] if expected_signature else ()
+        actual_settings = actual_signature[1:] if actual_signature else ()
+        signature_length = max(
+            len(expected_signature or ()),
+            len(actual_signature or ()),
+        )
+        default_settings = (False, 0, False, False) if signature_length > 4 else (
+            False, 0, False
+        )
+        if (
+            not size_changed
+            and (expected_settings or default_settings)
+            == (actual_settings or default_settings)
+        ):
+            continue
+
+        if not size_changed:
+            expected_size_value = (
+                expected_signature[0] if expected_signature else None
+            )
+            actual_size_value = expected_size_value
+        else:
+            expected_size_value = expected_signature[0] if expected_signature else None
+            actual_size_value = actual_signature[0] if actual_signature else None
+
+        expected_value = (expected_size_value,) + (
+            expected_settings or default_settings
+        )
+        actual_value = (actual_size_value,) + (
+            actual_settings or default_settings
+        )
+        if relation_changed:
+            if len(expected_value) <= 4:
+                expected_value += (False,) * (5 - len(expected_value))
+                actual_value += (False,) * (5 - len(actual_value))
+            expected_value += (False,)
+            actual_value += (True,)
+        expected_changes[index] = expected_value
+        actual_changes[index] = actual_value
+    return expected_changes, actual_changes
+
+
 def _format_dimension_differences(
     expected: dict[int, tuple[Any, ...]],
     actual: dict[int, tuple[Any, ...]],
@@ -811,6 +1437,8 @@ def _format_dimension_differences(
             parts.append("samengevouwen")
         if len(value) > 4 and value[4]:
             parts.append("best passend")
+        if len(value) > 5 and value[5]:
+            parts.append("wijkt af van gelijke modelafmetingen")
         return ", ".join(parts) or "standaard"
 
     expected_summary = []
@@ -819,7 +1447,7 @@ def _format_dimension_differences(
         extent = format_index(start, end)
         expected_summary.append(f"{extent}: {format_side(expected_value)}")
         actual_summary.append(f"{extent}: {format_side(actual_value)}")
-    return "; ".join(expected_summary), "; ".join(actual_summary)
+    return "\n".join(expected_summary), "\n".join(actual_summary)
 
 
 def _format_row_differences(
@@ -1106,8 +1734,11 @@ def _add_difference(
     item: str,
     expected: Any,
     actual: Any,
+    category: str | None = None,
 ) -> None:
-    differences.append(Difference(sheet, item, repr(expected), repr(actual)))
+    differences.append(
+        Difference(sheet, item, repr(expected), repr(actual), category)
+    )
 
 
 def compare_workbooks(reference_path: Path, student_path: Path) -> ComparisonResult:
@@ -1162,21 +1793,43 @@ def compare_workbooks(reference_path: Path, student_path: Path) -> ComparisonRes
 
         expected_rows = _row_dimension_signatures(expected, ignored_filter_rows)
         actual_rows = _row_dimension_signatures(actual, ignored_filter_rows)
-        if expected_rows != actual_rows:
+        expected_row_changes, actual_row_changes = _dimension_differences(
+            expected_rows,
+            actual_rows,
+            expected.sheet_format.defaultRowHeight or 15.0,
+            actual.sheet_format.defaultRowHeight or 15.0,
+        )
+        if expected_row_changes:
             expected_row_changes, actual_row_changes = _format_row_differences(
-                expected_rows, actual_rows
+                expected_row_changes, actual_row_changes
             )
-            _add_difference(differences, name, "Rijhoogtes/-instellingen",
-                            expected_row_changes, actual_row_changes)
+            differences.append(Difference(
+                name,
+                "Rijhoogtes/-instellingen",
+                expected_row_changes,
+                actual_row_changes,
+            ))
 
         expected_columns = _column_dimension_signatures(expected)
         actual_columns = _column_dimension_signatures(actual)
-        if expected_columns != actual_columns:
+        expected_default_width = expected.sheet_format.defaultColWidth or 8.7109375
+        actual_default_width = actual.sheet_format.defaultColWidth or 8.7109375
+        expected_column_changes, actual_column_changes = _dimension_differences(
+            expected_columns,
+            actual_columns,
+            expected_default_width,
+            actual_default_width,
+        )
+        if expected_column_changes:
             expected_column_changes, actual_column_changes = _format_column_differences(
-                expected_columns, actual_columns
+                expected_column_changes, actual_column_changes
             )
-            _add_difference(differences, name, "Kolombreedtes/-instellingen",
-                            expected_column_changes, actual_column_changes)
+            differences.append(Difference(
+                name,
+                "Kolombreedtes/-instellingen",
+                expected_column_changes,
+                actual_column_changes,
+            ))
 
         cell_keys = sorted(expected._cells.keys() | actual._cells.keys())
         formula_changes: dict[
@@ -1327,6 +1980,71 @@ def _safe_filename(name: str) -> str:
     return re.sub(r"[^\w.-]+", "_", name, flags=re.UNICODE).strip("._") or "leerling"
 
 
+def _report_value(item: str, value: str) -> str:
+    if not item.startswith(("Opmaak: lettertype", "Opmaak: opvulling")):
+        return html.escape(value)
+
+    parts = []
+    start = 0
+    for match in re.finditer(r"#[0-9A-Fa-f]{6}\b", value):
+        parts.append(html.escape(value[start:match.start()]))
+        color = match.group().upper()
+        parts.append(
+            f'{color} <span class="color-swatch" '
+            f'style="background-color:{color}" title="{color}"></span>'
+        )
+        start = match.end()
+    parts.append(html.escape(value[start:]))
+    return "".join(parts)
+
+
+_REPORT_CATEGORIES = (
+    "Opmaak",
+    "Functies / berekeningen",
+    "Invoer data (inhoud)",
+    "Sorteren/filteren",
+    "Afdrukeigenschappen",
+    "Grafieken",
+)
+
+
+def _report_category(difference: Difference) -> str:
+    if difference.category:
+        return difference.category
+    item = difference.item
+    if item.startswith(("Opmaak:", "Rijhoogtes", "Kolombreedtes")) or item in {
+        "Tabkleur",
+        "Voorwaardelijke opmaak",
+    }:
+        return "Opmaak"
+    if item in {"Sortering", "Filter"}:
+        return "Sorteren/filteren"
+    if item == "Afdrukbereik":
+        return "Afdrukeigenschappen"
+    if item == "Grafieken":
+        return "Grafieken"
+    if item == "Benoemde bereiken":
+        return "Functies / berekeningen"
+    return "Invoer data (inhoud)"
+
+
+def _report_format_subcategory(difference: Difference) -> str:
+    item = difference.item
+    if item.startswith("Opmaak: "):
+        label = item[len("Opmaak: "):]
+        if label.startswith("rand "):
+            return "Rand"
+        return label.split(" ", 1)[0].split(":", 1)[0].capitalize()
+    return item
+
+
+def _report_item_label(difference: Difference) -> str:
+    prefix = "Opmaak: "
+    if _report_category(difference) == "Opmaak" and difference.item.startswith(prefix):
+        return difference.item[len(prefix):]
+    return difference.item
+
+
 def write_report(result: ComparisonResult, output_path: Path) -> None:
     title = html.escape(result.student_file.stem)
     if result.error:
@@ -1337,28 +2055,72 @@ def write_report(result: ComparisonResult, output_path: Path) -> None:
         detail = '<p class="success">De gecontroleerde onderdelen komen overeen met het modelbestand.</p>'
     else:
         status = f"{len(result.differences)} verschil(len) gevonden"
-        rows = "".join(
-            "<tr>"
-            f"<td>{html.escape(item.sheet)}</td>"
-            f"<td>{html.escape(item.item)}</td>"
-            f"<td><code>{html.escape(item.expected)}</code></td>"
-            f"<td><code>{html.escape(item.actual)}</code></td>"
-            "</tr>"
-            for item in result.differences
-        )
-        detail = (
-            "<table><thead><tr><th>Werkblad</th><th>Onderdeel</th>"
-            "<th>Modeloplossing</th><th>Leerlingbestand</th></tr></thead>"
-            f"<tbody>{rows}</tbody></table>"
-        )
+        sheets: dict[str, dict[str, list[Difference]]] = {}
+        for difference in result.differences:
+            category = _report_category(difference)
+            sheets.setdefault(difference.sheet, {}).setdefault(category, []).append(
+                difference
+            )
+
+        sheet_sections = []
+        for sheet, categories in sheets.items():
+            category_sections = []
+            for category in _REPORT_CATEGORIES:
+                differences = categories.get(category)
+                if not differences:
+                    continue
+
+                def render_table(items: list[Difference]) -> str:
+                    rows = "".join(
+                        "<tr>"
+                        f"<td>{html.escape(_report_item_label(item))}</td>"
+                        f"<td><code>{_report_value(item.item, item.expected)}</code></td>"
+                        f"<td><code>{_report_value(item.item, item.actual)}</code></td>"
+                        "</tr>"
+                        for item in items
+                    )
+                    return (
+                        "<table><thead><tr><th>Onderdeel</th>"
+                        "<th>Modeloplossing</th><th>Leerlingbestand</th></tr></thead>"
+                        f"<tbody>{rows}</tbody></table>"
+                    )
+
+                if category == "Opmaak":
+                    subcategories: dict[str, list[Difference]] = {}
+                    for difference in differences:
+                        subcategory = _report_format_subcategory(difference)
+                        subcategories.setdefault(subcategory, []).append(difference)
+                    format_sections = "".join(
+                        f"<h4>{html.escape(subcategory)}</h4>"
+                        + render_table(subcategory_differences)
+                        for subcategory, subcategory_differences in subcategories.items()
+                    )
+                    category_sections.append(
+                        f"<h3>{html.escape(category)}</h3>{format_sections}"
+                    )
+                    continue
+
+                category_sections.append(
+                    f"<h3>{html.escape(category)}</h3>"
+                    + render_table(differences)
+                )
+            sheet_sections.append(
+                f'<section class="sheet-section"><h2>{html.escape(sheet)}</h2>'
+                + "".join(category_sections)
+                + "</section>"
+            )
+        detail = "<hr>".join(sheet_sections)
     document = f"""<!doctype html>
 <html lang="nl"><meta charset="utf-8"><meta name="viewport" content="width=device-width">
 <title>Excel Checker - {title}</title>
 <style>
 body{{font:16px/1.5 system-ui,sans-serif;max-width:1100px;margin:2rem auto;padding:0 1rem;color:#202124}}
-h1{{font-size:1.6rem}}.success{{color:#137333}}.error{{color:#b3261e}}
+h1{{font-size:1.6rem}}h2{{font-size:1.35rem;margin-top:1.5rem}}h3{{font-size:1.1rem;margin-bottom:.3rem}}
+h4{{font-size:1rem;margin:1rem 0 .2rem}}
+.success{{color:#137333}}.error{{color:#b3261e}}hr{{border:0;border-top:2px solid #dadce0;margin:2rem 0}}
 table{{border-collapse:collapse;width:100%;margin-top:1rem}}th,td{{border:1px solid #dadce0;padding:.6rem;text-align:left;vertical-align:top}}
 th{{background:#f1f3f4}}code{{white-space:pre-wrap;overflow-wrap:anywhere}}
+.color-swatch{{display:inline-block;width:50px;height:50px;border:1px solid #777;vertical-align:middle;margin:0 .25rem}}
 </style>
 <h1>Controlerapport: {title}</h1><p><strong>Resultaat:</strong> {status}</p>
 {detail}
