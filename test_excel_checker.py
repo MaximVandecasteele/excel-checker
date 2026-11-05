@@ -1,8 +1,12 @@
 import tempfile
+import json
+import threading
 import unittest
 from copy import copy
 from datetime import date
 from pathlib import Path
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.chart import BarChart, Reference
@@ -16,6 +20,8 @@ from openpyxl.styles.differential import DifferentialStyle
 from openpyxl.worksheet.filters import FilterColumn, Filters, SortCondition, SortState
 from openpyxl.worksheet.table import Table
 
+from pdf_exporter import find_html_reports
+from report_server import make_report_server
 from excel_checker import (
     ComparisonResult,
     Difference,
@@ -654,7 +660,7 @@ class WorkbookComparisonTests(unittest.TestCase):
         )
         self.assertIn("\n", difference.expected)
         report_path = self.directory / "rapport.html"
-        write_report(result, report_path)
+        write_report(result, report_path, {"Sheet": {"Opmaak": 2}})
         report = report_path.read_text(encoding="utf-8")
         self.assertIn("B: breedte 10.0\nD: breedte 20.0", report)
         self.assertIn("white-space:pre-wrap", report)
@@ -807,7 +813,11 @@ class WorkbookComparisonTests(unittest.TestCase):
             workbook.save(path)
 
         report_path = self.directory / "randen.html"
-        write_report(compare_workbooks(self.reference, self.student), report_path)
+        write_report(
+            compare_workbooks(self.reference, self.student),
+            report_path,
+            {"Sheet": {"Opmaak": 2}},
+        )
         report = report_path.read_text(encoding="utf-8")
         self.assertIn(
             "bovenrand stijl: dik\n"
@@ -1206,7 +1216,11 @@ class WorkbookComparisonTests(unittest.TestCase):
             workbook.save(path)
 
         report_path = self.directory / "kleuren.html"
-        write_report(compare_workbooks(self.reference, self.student), report_path)
+        write_report(
+            compare_workbooks(self.reference, self.student),
+            report_path,
+            {"Sheet": {"Opmaak": 2}},
+        )
         report = report_path.read_text(encoding="utf-8")
         self.assertIn(
             '<span class="color-swatch" style="background-color:#FF0000"',
@@ -1237,7 +1251,17 @@ class WorkbookComparisonTests(unittest.TestCase):
         )
         report_path = self.directory / "gegroepeerd.html"
 
-        write_report(result, report_path)
+        write_report(
+            result,
+            report_path,
+            {
+                "Data": {
+                    "Opmaak": 3,
+                    "Invoer data (inhoud)": 4,
+                },
+                "Berekeningen": {"Functies / berekeningen": 3},
+            },
+        )
 
         report = report_path.read_text(encoding="utf-8")
         self.assertIn("<h2>Data</h2>", report)
@@ -1255,7 +1279,7 @@ class WorkbookComparisonTests(unittest.TestCase):
         self.assertIn("</section><hr><section", report)
         self.assertNotIn("<th>Werkblad</th>", report)
 
-    def test_html_report_allows_per_exam_scoring_and_persists_it(self):
+    def test_html_report_uses_fixed_maximum_and_empty_score_is_zero(self):
         result = ComparisonResult(
             self.student,
             [
@@ -1265,32 +1289,216 @@ class WorkbookComparisonTests(unittest.TestCase):
         )
         report_path = self.directory / "punten.html"
 
-        write_report(result, report_path)
+        write_report(result, report_path, {"Data": {"Opmaak": 2}})
 
         report = report_path.read_text(encoding="utf-8")
-        for category in (
-            "Opmaak",
-            "Functies / berekeningen",
-            "Invoer data (inhoud)",
-            "Sorteren/filteren",
-            "Afdrukeigenschappen",
-            "Grafieken",
-        ):
-            self.assertIn(f'aria-label="{category} behaalde punten"', report)
-            self.assertIn(f'aria-label="{category} maximum punten"', report)
-        self.assertIn("Totaalscore", report)
+        self.assertIn('aria-label="Data — Opmaak behaalde punten"', report)
+        self.assertIn('max="2"', report)
+        self.assertIn("/ 2 punten", report)
+        self.assertNotIn('data-score-field="maximum"', report)
+        self.assertNotIn('aria-label="Grafieken behaalde punten"', report)
+        self.assertIn("<h2>Totaalscore</h2>", report)
         self.assertIn("excel-checker-score:", report)
         self.assertIn("localStorage.setItem", report)
         self.assertIn("localStorage.getItem", report)
         self.assertIn("score-total", report)
         self.assertIn("earnedTotal", report)
         self.assertIn("maximumTotal", report)
+        self.assertIn('field.value === "" ? 0 : field.valueAsNumber', report)
+        self.assertIn('class="pdf-button"', report)
+        self.assertIn('class="save-report-button"', report)
+        self.assertIn("onclick=\"window.print()\"", report)
+        self.assertIn(".pdf-button{display:none}", report)
+        self.assertIn(".save-report-button{display:none}", report)
+        self.assertIn('data-score-print="0"', report)
+        self.assertIn("window.print()", report)
+        self.assertIn('class="save-report-button"', report)
+        self.assertIn("snapshotGrading.dataset.scoresEmbedded = \"true\"", report)
+        self.assertIn('setAttribute("value", field.value)', report)
+        self.assertIn("window.showSaveFilePicker", report)
+        self.assertIn("await writable.write(blob)", report)
+        self.assertIn("browser ondersteunt lokaal overschrijven niet", report)
+        heading_position = report.index("<h3>Opmaak</h3>")
+        score_position = report.index('aria-label="Data — Opmaak behaalde punten"')
+        total_position = report.index("<h2>Totaalscore</h2>")
+        self.assertLess(heading_position, score_position)
+        self.assertLess(score_position, total_position)
+
+    def test_unscored_parts_are_hidden_from_the_report(self):
+        result = ComparisonResult(
+            self.student,
+            [
+                Difference("Data", "Opmaak: lettertype", "vet", "normaal", "Opmaak"),
+                Difference("Data", "A1 inhoud/formule", "'model'", "'leerling'",
+                           "Invoer data (inhoud)"),
+            ],
+        )
+        report_path = self.directory / "alleen_opmaak.html"
+
+        write_report(result, report_path, {"Data": {"Opmaak": 1}})
+
+        report = report_path.read_text(encoding="utf-8")
+        self.assertIn("<h4>Lettertype</h4>", report)
+        self.assertNotIn("<h3>Invoer data (inhoud)</h3>", report)
+        self.assertNotIn("'leerling'", report)
+        self.assertNotIn("Geen onderdelen geselecteerd", report)
+
+    def test_scoring_is_independent_for_each_worksheet(self):
+        result = ComparisonResult(
+            self.student,
+            [
+                Difference("Data", "Opmaak: lettertype", "vet", "normaal", "Opmaak"),
+                Difference(
+                    "Berekeningen", "C2 inhoud/formule", "=A2+B2", "=A2-B2",
+                    "Functies / berekeningen",
+                ),
+            ],
+        )
+        report_path = self.directory / "punten_per_werkblad.html"
+
+        write_report(
+            result,
+            report_path,
+            {
+                "Data": {"Opmaak": 2},
+                "Berekeningen": {"Functies / berekeningen": 5},
+            },
+        )
+
+        report = report_path.read_text(encoding="utf-8")
+        data_start = report.index("<h2>Data</h2>")
+        calculations_start = report.index("<h2>Berekeningen</h2>")
+        data_score = report.index('aria-label="Data — Opmaak behaalde punten"')
+        calculations_score = report.index(
+            'aria-label="Berekeningen — Functies / berekeningen behaalde punten"'
+        )
+        self.assertLess(data_start, data_score)
+        self.assertLess(data_score, calculations_start)
+        self.assertLess(calculations_start, calculations_score)
+        self.assertIn('max="2"', report)
+        self.assertIn('max="5"', report)
+        self.assertEqual(report.count('<input id="score-'), 2)
+
+    def test_part_without_errors_is_automatically_awarded_full_score(self):
+        result = ComparisonResult(
+            self.student,
+            [
+                Difference(
+                    "Data", "A1 inhoud/formule", "'model'", "'leerling'",
+                    "Invoer data (inhoud)",
+                ),
+            ],
+        )
+        report_path = self.directory / "automatische_maxscore.html"
+
+        write_report(
+            result,
+            report_path,
+            {"Data": {"Opmaak": 2, "Invoer data (inhoud)": 3}},
+        )
+
+        report = report_path.read_text(encoding="utf-8")
+        auto_score_end = report.index('aria-label="Data — Opmaak behaalde punten"')
+        auto_score_start = report.rfind("<input", 0, auto_score_end)
+        auto_score = report[auto_score_start:auto_score_end]
+        self.assertIn('value="2"', auto_score)
+        self.assertIn('data-auto-award="true"', auto_score)
         self.assertIn(
-            '<div class="category-heading"><h3>Opmaak</h3>'
-            '<span class="inline-score" data-score-category="Opmaak">',
+            "Geen fouten gevonden; maximumscore automatisch toegekend.",
             report,
         )
-        self.assertNotIn('<table class="score-table"', report)
+        self.assertNotIn(
+            'aria-label="Data — Invoer data (inhoud) behaalde punten" value="3"',
+            report,
+        )
+        self.assertIn(
+            'field.dataset.autoAward === "true" && values[index] === ""',
+            report,
+        )
+
+    def test_empty_scoring_configuration_does_not_evaluate_any_part(self):
+        result = ComparisonResult(
+            self.student,
+            [Difference("Data", "A1 inhoud/formule", "1", "2")],
+        )
+        report_path = self.directory / "geen_puntenverdeling.html"
+
+        write_report(result, report_path, {})
+
+        report = report_path.read_text(encoding="utf-8")
+        self.assertIn("Geen onderdelen geselecteerd", report)
+        self.assertNotIn("A1 inhoud/formule", report)
+        self.assertNotIn('<input id="score-', report)
+
+    def test_pdf_exporter_finds_only_html_files_in_selected_folder(self):
+        html_path = self.directory / "leerling.html"
+        htm_path = self.directory / "leerling2.htm"
+        other_path = self.directory / "not-a-report.xlsx"
+        html_path.touch()
+        htm_path.touch()
+        other_path.touch()
+
+        self.assertEqual(
+            find_html_reports(self.directory),
+            [html_path, htm_path],
+        )
+
+    def test_local_report_server_persists_scores_and_rejects_out_of_range(self):
+        report_path = self.directory / "server_rapport.html"
+        write_report(
+            ComparisonResult(
+                self.student,
+                [Difference("Data", "A1 inhoud/formule", "1", "2")],
+            ),
+            report_path,
+            {"Data": {"Invoer data (inhoud)": 3}},
+        )
+        server = make_report_server(self.directory)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base_url = f"http://127.0.0.1:{server.server_port}"
+        try:
+            with urlopen(f"{base_url}/") as response:
+                self.assertIn("server_rapport", response.read().decode("utf-8"))
+            with urlopen(f"{base_url}/reports/{report_path.name}") as response:
+                self.assertIn(
+                    'data-score-file="server_rapport.html"',
+                    response.read().decode("utf-8"),
+                )
+            with urlopen(f"{base_url}/api/scores/{report_path.name}") as response:
+                self.assertEqual(json.load(response), {"scores": []})
+
+            request = Request(
+                f"{base_url}/api/scores/{report_path.name}",
+                data=json.dumps({"scores": ["2.5"]}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urlopen(request) as response:
+                self.assertEqual(json.load(response), {"saved": True})
+            saved_report = report_path.read_text(encoding="utf-8")
+            self.assertIn('data-scores-embedded="true"', saved_report)
+            self.assertIn('id="score-0"', saved_report)
+            self.assertIn('value="2.5"', saved_report)
+            saved_path = self.directory / ".excel_checker_scores" / f"{report_path.name}.json"
+            self.assertEqual(
+                json.loads(saved_path.read_text(encoding="utf-8")),
+                {"scores": ["2.5"]},
+            )
+
+            invalid_request = Request(
+                f"{base_url}/api/scores/{report_path.name}",
+                data=json.dumps({"scores": ["3.5"]}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with self.assertRaises(HTTPError) as error:
+                urlopen(invalid_request)
+            self.assertEqual(error.exception.code, 400)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
 
     def test_copied_formula_errors_in_a_row_are_grouped(self):
         for path, multiplier in ((self.reference, 2), (self.student, 3)):

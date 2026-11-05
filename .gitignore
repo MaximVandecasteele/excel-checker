@@ -13,5 +13,7 @@ venv/
 # Excel workbooks and generated reports may contain student data
 *.xlsx
 *.xlsm
+*.pdf
 reports/
 Excel_Checker_rapporten/
+.excel_checker_scores/

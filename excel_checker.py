@@ -2132,6 +2132,15 @@ _REPORT_CATEGORIES = (
     "Grafieken",
 )
 
+SCORING_PARTS = (
+    "Opmaak",
+    "Functies / berekeningen",
+    "Invoer data (inhoud)",
+    "Sorteren/filteren",
+    "Afdrukeigenschappen",
+    "Grafieken",
+)
+
 
 def _report_category(difference: Difference) -> str:
     if difference.category:
@@ -2163,6 +2172,13 @@ def _report_format_subcategory(difference: Difference) -> str:
     return item
 
 
+def _report_scoring_part(difference: Difference) -> str:
+    category = _report_category(difference)
+    if category == "Opmaak":
+        return "Opmaak"
+    return category
+
+
 def _report_item_label(difference: Difference) -> str:
     prefix = "Opmaak: "
     if _report_category(difference) == "Opmaak" and difference.item.startswith(prefix):
@@ -2170,49 +2186,80 @@ def _report_item_label(difference: Difference) -> str:
     return difference.item
 
 
-def write_report(result: ComparisonResult, output_path: Path) -> None:
+def write_report(
+    result: ComparisonResult,
+    output_path: Path,
+    scoring_parts: dict[str, dict[str, float]] | None = None,
+) -> None:
     title = html.escape(result.student_file.stem)
-    scored_categories: set[str] = set()
-
-    def score_fields(category: str) -> str:
-        if category in scored_categories:
-            return ""
-        scored_categories.add(category)
-        escaped_category = html.escape(category, quote=True)
-        return (
-            f'<span class="inline-score" data-score-category="{escaped_category}">'
-            f'<label>Behaald <input type="number" min="0" step="any" '
-            f'aria-label="{escaped_category} behaalde punten" '
-            'data-score-field="earned"></label>'
-            '<span aria-hidden="true">/</span>'
-            f'<label>Maximum <input type="number" min="0" step="any" '
-            f'aria-label="{escaped_category} maximum punten" '
-            'data-score-field="maximum"></label>'
-            "</span>"
+    scoring_parts = {
+        sheet: parts
+        for sheet, parts in (scoring_parts or {}).items()
+        if parts
+    }
+    score_ids = {
+        (sheet, part): index
+        for index, (sheet, part) in enumerate(
+            (sheet, part)
+            for sheet, parts in scoring_parts.items()
+            for part in parts
         )
+    }
+
+    def score_field(
+        sheet: str,
+        part: str,
+        maximum: float,
+        auto_award: bool = False,
+    ) -> str:
+        index = score_ids[(sheet, part)]
+        escaped_part = html.escape(f"{sheet} — {part}", quote=True)
+        escaped_maximum = html.escape(str(maximum), quote=True)
+        initial_value = f' value="{escaped_maximum}"' if auto_award else ""
+        auto_award_attribute = ' data-auto-award="true"' if auto_award else ""
+        return (
+            f'<span class="inline-score"><label for="score-{index}">'
+            f'Behaald</label> <input id="score-{index}" type="number" min="0" '
+            f'max="{escaped_maximum}" step="any" data-score-field="earned" '
+            f'data-maximum="{escaped_maximum}"{initial_value}{auto_award_attribute} '
+            f'aria-label="{escaped_part} behaalde punten">'
+            f'<span class="print-score" data-score-print="{index}"></span>'
+            f' / {html.escape(str(maximum))} punten</span>'
+        )
+
+    visible_differences = [
+        difference for difference in result.differences
+        if _report_scoring_part(difference) in scoring_parts.get(difference.sheet, {})
+    ]
 
     if result.error:
         status = "Bestand niet beoordeeld"
         detail = f'<p class="error">{html.escape(result.error)}</p>'
-    elif result.matches:
-        status = "Geen verschillen gevonden"
-        detail = '<p class="success">De gecontroleerde onderdelen komen overeen met het modelbestand.</p>'
+    elif not scoring_parts:
+        status = "Geen onderdelen geselecteerd"
+        detail = '<p class="no-differences">Er is geen puntenverdeling ingesteld; er zijn geen onderdelen beoordeeld.</p>'
     else:
-        status = f"{len(result.differences)} verschil(len) gevonden"
+        status = (
+            "Geen verschillen gevonden in de beoordeelde onderdelen"
+            if not visible_differences
+            else f"{len(visible_differences)} verschil(len) gevonden"
+        )
         sheets: dict[str, dict[str, list[Difference]]] = {}
-        for difference in result.differences:
+        for difference in visible_differences:
             category = _report_category(difference)
             sheets.setdefault(difference.sheet, {}).setdefault(category, []).append(
                 difference
             )
 
         sheet_sections = []
-        for sheet, categories in sheets.items():
+        for sheet, sheet_scoring in scoring_parts.items():
+            categories = sheets.get(sheet, {})
             category_sections = []
             for category in _REPORT_CATEGORIES:
-                differences = categories.get(category)
-                if not differences:
+                if category not in sheet_scoring:
                     continue
+                differences = categories.get(category, [])
+                maximum = sheet_scoring[category]
 
                 def render_table(items: list[Difference]) -> str:
                     rows = "".join(
@@ -2239,49 +2286,56 @@ def write_report(result: ComparisonResult, output_path: Path) -> None:
                         + render_table(subcategory_differences)
                         for subcategory, subcategory_differences in subcategories.items()
                     )
+                    details = format_sections or (
+                        '<p class="no-differences">Geen fouten gevonden; maximumscore automatisch toegekend.</p>'
+                    )
                     category_sections.append(
                         f'<div class="category-heading"><h3>{html.escape(category)}</h3>'
-                        f"{score_fields(category)}</div>{format_sections}"
+                        f'{score_field(sheet, category, maximum, not differences)}</div>{details}'
                     )
                     continue
 
+                details = (
+                    render_table(differences)
+                    if differences else
+                    '<p class="no-differences">Geen fouten gevonden; maximumscore automatisch toegekend.</p>'
+                )
                 category_sections.append(
                     f'<div class="category-heading"><h3>{html.escape(category)}</h3>'
-                    f"{score_fields(category)}</div>"
-                    + render_table(differences)
+                    f'{score_field(sheet, category, maximum, not differences)}</div>' + details
                 )
             sheet_sections.append(
                 f'<section class="sheet-section"><h2>{html.escape(sheet)}</h2>'
                 + "".join(category_sections)
                 + "</section>"
             )
+        if not visible_differences:
+            sheet_sections.insert(
+                0,
+                '<p class="success">De geselecteerde onderdelen komen overeen met het modelbestand.</p>',
+            )
         detail = "<hr>".join(sheet_sections)
-    if result.error is None:
-        missing_score_categories = [
-            category for category in _REPORT_CATEGORIES
-            if category not in scored_categories
-        ]
-        if missing_score_categories:
-            fallback_sections = "".join(
-                f'<div class="category-heading"><h3>{html.escape(category)}</h3>'
-                f'<p class="no-differences">Geen meldingen in deze categorie.</p>'
-                f"{score_fields(category)}</div>"
-                for category in missing_score_categories
-            )
-            detail += (
-                '<section class="unreported-categories">'
-                "<h2>Andere te beoordelen onderdelen</h2>"
-                f"{fallback_sections}</section>"
-            )
-
+    grading_start = ""
+    grading_end = ""
+    if result.error is None and scoring_parts:
         score_key = html.escape(str(output_path.resolve()), quote=True)
-        detail += (
-            f'<section class="grading" data-score-key="{score_key}">'
-            "<h2>Totaalscore</h2>"
-            '<p class="score-total" aria-live="polite">— / —</p>'
-            '<p class="score-status" aria-live="polite"></p>'
-            "</section>"
+        report_name = html.escape(output_path.name, quote=True)
+        grading_start = (
+            f'<main class="grading" data-score-key="{score_key}" '
+            f'data-score-file="{report_name}">'
         )
+        grading_end = (
+            '<section class="score-summary">'
+            "<h2>Totaalscore</h2>"
+            '<p class="score-total" aria-live="polite"></p>'
+            '<p class="score-status" aria-live="polite"></p>'
+            "</section></main>"
+        )
+    pdf_button = (
+        '<button class="pdf-button" type="button" onclick="window.print()">'
+        "Opslaan als PDF</button>"
+        if result.error is None and scoring_parts else ""
+    )
     document = f"""<!doctype html>
 <html lang="nl"><meta charset="utf-8"><meta name="viewport" content="width=device-width">
 <title>Excel Checker - {title}</title>
@@ -2293,118 +2347,230 @@ h4{{font-size:1rem;margin:1rem 0 .2rem}}
 table{{border-collapse:collapse;width:100%;margin-top:1rem}}th,td{{border:1px solid #dadce0;padding:.6rem;text-align:left;vertical-align:top}}
 th{{background:#f1f3f4}}code{{white-space:pre-wrap;overflow-wrap:anywhere}}
 .color-swatch{{display:inline-block;width:50px;height:50px;border:1px solid #777;vertical-align:middle;margin:0 .25rem}}
-.category-heading{{display:flex;align-items:center;gap:1rem;flex-wrap:wrap}}
+.category-heading{{display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap}}
 .category-heading h3{{margin:.7rem 0}}
-.inline-score{{display:inline-flex;align-items:center;gap:.45rem;font-size:.9rem}}
-.inline-score label{{display:inline-flex;align-items:center;gap:.3rem}}
-.inline-score input{{box-sizing:border-box;width:5.5rem;padding:.25rem;font:inherit}}
+.inline-score{{display:inline-flex;align-items:center;gap:.35rem;font-size:.9rem}}
+.inline-score input{{box-sizing:border-box;width:5rem;padding:.2rem;font:inherit}}
+.print-score{{display:none}}
+.pdf-button,.save-report-button{{padding:.5rem .8rem;font:inherit;cursor:pointer}}
 .no-differences{{margin:.4rem 0;color:#5f6368}}
 .score-total{{font-weight:700}}.score-status{{min-height:1.5em;color:#b3261e}}
-@media print{{.inline-score input{{border:0;padding:0}}}}
+@media print{{
+  .pdf-button{{display:none}}
+  .save-report-button{{display:none}}
+  .inline-score input{{display:none}}
+  .print-score{{display:inline}}
+}}
 </style>
-<h1>Controlerapport: {title}</h1><p><strong>Resultaat:</strong> {status}</p>
-{detail}
+<h1>Controlerapport: {title}</h1><p><strong>Resultaat:</strong> {status}</p>{pdf_button}
+{('<button class="save-report-button" type="button">Bewaar rapport met scores</button>' if result.error is None and scoring_parts else '')}
+{grading_start}{detail}{grading_end}
 <script>
 (() => {{
   const grading = document.querySelector(".grading");
   if (!grading) return;
 
   const storageKey = "excel-checker-score:" + grading.dataset.scoreKey;
-  const groups = [...document.querySelectorAll(".inline-score")];
-  const fields = [...document.querySelectorAll(".inline-score input[data-score-field]")];
+  const fields = [...grading.querySelectorAll('input[data-score-field="earned"]')];
   const total = grading.querySelector(".score-total");
   const status = grading.querySelector(".score-status");
+  const reportFile = grading.dataset.scoreFile;
+  const localServer =
+    location.protocol === "http:" &&
+    ["127.0.0.1", "localhost", "::1"].includes(location.hostname) &&
+    Boolean(reportFile);
+  let serverReady = false;
+  let saveTimer = null;
 
   const format = (value) => value.toLocaleString("nl-BE", {{
     maximumFractionDigits: 2
   }});
+  const scoreIsEmbedded = grading.dataset.scoresEmbedded === "true";
 
   const calculate = () => {{
     let earnedTotal = 0;
     let maximumTotal = 0;
     let valid = true;
-    let complete = true;
-
-    for (const group of groups) {{
-      const earnedField = group.querySelector('[data-score-field="earned"]');
-      const maximumField = group.querySelector('[data-score-field="maximum"]');
-      const earnedEmpty = earnedField.value === "";
-      const maximumEmpty = maximumField.value === "";
-      const earned = earnedField.valueAsNumber;
-      const maximum = maximumField.valueAsNumber;
-      if (earnedEmpty || maximumEmpty) {{
-        complete = false;
-        earnedField.setCustomValidity("");
-        maximumField.setCustomValidity("");
-        continue;
-      }}
-      const rowValid =
-        Number.isFinite(earned) &&
-        Number.isFinite(maximum) &&
-        earned >= 0 &&
-        maximum >= 0 &&
-        earned <= maximum;
-
-      earnedField.setCustomValidity(
-        rowValid ? "" : "Vul geldige punten in; behaald kan niet hoger zijn dan het maximum."
+    for (const field of fields) {{
+      const maximum = Number(field.dataset.maximum);
+      const earned = field.value === "" ? 0 : field.valueAsNumber;
+      const rowValid = Number.isFinite(earned) && earned >= 0 && earned <= maximum;
+      field.setCustomValidity(
+        rowValid ? "" : "Vul geldige punten in tussen 0 en het maximum."
       );
-      maximumField.setCustomValidity(
-        rowValid ? "" : "Vul een geldig maximum in dat minstens gelijk is aan de behaalde punten."
+      const printScore = grading.querySelector(
+        `[data-score-print="${{field.id.replace("score-", "")}}"]`
       );
+      printScore.textContent = rowValid ? format(earned) : "";
       valid = valid && rowValid;
-      if (rowValid) {{
-        earnedTotal += earned;
-        maximumTotal += maximum;
-      }}
+      if (rowValid) earnedTotal += earned;
+      maximumTotal += maximum;
     }}
 
     total.textContent = !valid
       ? "Controleer de punteninvoer"
-      : complete
-        ? `${{format(earnedTotal)}} / ${{format(maximumTotal)}}`
-        : "— / —";
+      : `${{format(earnedTotal)}} / ${{format(maximumTotal)}} punten`;
     status.textContent = !valid
       ? "Controleer de invoer: behaalde punten moeten tussen 0 en het maximum liggen."
-      : complete
-        ? "Punten worden automatisch in deze browser bewaard."
-        : "Vul per onderdeel de behaalde punten en het maximum in. Gebruik 0 als het onderdeel niet meetelt.";
+      : "Niet ingevulde scores tellen als 0. Scores worden automatisch in deze browser bewaard.";
 
-    try {{
-      localStorage.setItem(storageKey, JSON.stringify(
-        fields.map((field) => field.value)
-      ));
-    }} catch (error) {{
-      status.textContent =
-        "Opslaan in deze browser is niet beschikbaar: " + error.message;
+    if (localServer) {{
+      if (serverReady) {{
+        clearTimeout(saveTimer);
+        saveTimer = setTimeout(saveScoresToServer, 250);
+      }}
+      status.textContent = serverReady
+        ? "Scores worden automatisch opgeslagen op deze computer."
+        : "Scores laden…";
+    }} else if (!scoreIsEmbedded) {{
+      try {{
+        localStorage.setItem(storageKey, JSON.stringify(
+          fields.map((field) => field.value)
+        ));
+      }} catch (error) {{
+        status.textContent =
+          "Opslaan in deze browser is niet beschikbaar: " + error.message;
+      }}
     }}
   }};
 
-  try {{
-    const saved = localStorage.getItem(storageKey);
-    if (saved !== null) {{
-      const values = JSON.parse(saved);
-      if (Array.isArray(values) && values.length === fields.length) {{
-        fields.forEach((field, index) => {{
-          if (typeof values[index] === "string") field.value = values[index];
-        }});
-      }} else {{
-        status.textContent = "Opgeslagen scores konden niet worden hersteld.";
+  async function saveScoresToServer() {{
+    try {{
+      const response = await fetch(
+        `/api/scores/${{encodeURIComponent(reportFile)}}`,
+        {{
+          method: "POST",
+          headers: {{ "Content-Type": "application/json" }},
+          body: JSON.stringify({{ scores: fields.map((field) => field.value) }})
+        }}
+      );
+      if (!response.ok) {{
+        throw new Error(`Opslaan mislukt (HTTP ${{response.status}}).`);
       }}
+      status.textContent = "Scores automatisch opgeslagen op deze computer.";
+    }} catch (error) {{
+      status.textContent = "Scores opslaan is niet gelukt: " + error.message;
     }}
-  }} catch (error) {{
-    status.textContent =
-      "Opgeslagen scores konden niet worden gelezen: " + error.message;
+  }}
+
+  async function loadScoresFromServer() {{
+    try {{
+      const response = await fetch(
+        `/api/scores/${{encodeURIComponent(reportFile)}}`,
+        {{ cache: "no-store" }}
+      );
+      if (!response.ok) {{
+        throw new Error(`Scores laden mislukt (HTTP ${{response.status}}).`);
+      }}
+      const saved = await response.json();
+      if (Array.isArray(saved.scores) && saved.scores.length === fields.length) {{
+        fields.forEach((field, index) => {{
+          const autoAwardWithEmptySavedValue =
+            field.dataset.autoAward === "true" && saved.scores[index] === "";
+          if (
+            typeof saved.scores[index] === "string" &&
+            !autoAwardWithEmptySavedValue
+          ) field.value = saved.scores[index];
+        }});
+      }} else if (saved.scores.length !== 0) {{
+        throw new Error("De opgeslagen scoregegevens komen niet overeen met dit rapport.");
+      }}
+      serverReady = true;
+      calculate();
+    }} catch (error) {{
+      status.textContent = "Scores laden is niet gelukt: " + error.message;
+    }}
+  }}
+
+  if (localServer) {{
+    loadScoresFromServer();
+  }} else if (!scoreIsEmbedded) {{
+    try {{
+      const saved = localStorage.getItem(storageKey);
+      if (saved !== null) {{
+        const values = JSON.parse(saved);
+        if (Array.isArray(values) && values.length === fields.length) {{
+          fields.forEach((field, index) => {{
+            const autoAwardWithEmptySavedValue =
+              field.dataset.autoAward === "true" && values[index] === "";
+            if (
+              typeof values[index] === "string" &&
+              !autoAwardWithEmptySavedValue
+            ) field.value = values[index];
+          }});
+        }} else {{
+          status.textContent = "Opgeslagen scores konden niet worden hersteld.";
+        }}
+      }}
+    }} catch (error) {{
+      status.textContent =
+        "Opgeslagen scores konden niet worden gelezen: " + error.message;
+    }}
   }}
 
   fields.forEach((field) => field.addEventListener("input", calculate));
   calculate();
+
+  const saveButton = document.querySelector(".save-report-button");
+  if (saveButton) {{
+    saveButton.addEventListener("click", async () => {{
+      const snapshot = document.documentElement.cloneNode(true);
+      const snapshotGrading = snapshot.querySelector(".grading");
+      snapshotGrading.dataset.scoresEmbedded = "true";
+      const snapshotFields = [
+        ...snapshotGrading.querySelectorAll('input[data-score-field="earned"]')
+      ];
+      fields.forEach((field, index) => {{
+        snapshotFields[index].setAttribute("value", field.value);
+      }});
+      const blob = new Blob(
+        ["<!doctype html>\\n", snapshot.outerHTML],
+        {{ type: "text/html;charset=utf-8" }}
+      );
+      const filename =
+        document.title.replace(/[^\\w.-]+/g, "_") + "_met_scores.html";
+      if (window.showSaveFilePicker) {{
+        try {{
+          const handle = await window.showSaveFilePicker({{
+            suggestedName: filename,
+            types: [{{
+              description: "HTML-rapport",
+              accept: {{ "text/html": [".html"] }}
+            }}]
+          }});
+          const writable = await handle.createWritable();
+          await writable.write(blob);
+          await writable.close();
+          status.textContent = "Rapport met scores opgeslagen.";
+        }} catch (error) {{
+          if (error.name !== "AbortError") {{
+            status.textContent =
+              "Rapport opslaan is niet gelukt: " + error.message;
+          }}
+        }}
+        return;
+      }}
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(blob);
+      link.download = filename;
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+      status.textContent =
+        "De browser ondersteunt lokaal overschrijven niet; rapport met scores gedownload.";
+    }});
+  }}
 }})();
 </script>
 </html>"""
     output_path.write_text(document, encoding="utf-8")
 
 
-def check_folder(reference_path: Path, student_folder: Path, output_folder: Path) -> list[Path]:
+def check_folder(
+    reference_path: Path,
+    student_folder: Path,
+    output_folder: Path,
+    scoring_parts: dict[str, dict[str, float]] | None = None,
+) -> list[Path]:
     output_folder.mkdir(parents=True, exist_ok=True)
     student_files = sorted(
         path for path in student_folder.iterdir()
@@ -2420,6 +2586,10 @@ def check_folder(reference_path: Path, student_folder: Path, output_folder: Path
         used_names[base] = used_names.get(base, 0) + 1
         suffix = f"_{used_names[base]}" if used_names[base] > 1 else ""
         report_path = output_folder / f"{base}{suffix}_rapport.html"
-        write_report(compare_workbooks(reference_path, student_file), report_path)
+        write_report(
+            compare_workbooks(reference_path, student_file),
+            report_path,
+            scoring_parts,
+        )
         report_paths.append(report_path)
     return report_paths
