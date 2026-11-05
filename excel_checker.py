@@ -47,8 +47,22 @@ def _theme_color_values(theme: bytes | None) -> tuple[str | None, ...]:
     scheme = root.find(".//{*}clrScheme")
     if scheme is None:
         return ()
+
+    color_names = (
+        "lt1", "dk1", "lt2", "dk2",
+        "accent1", "accent2", "accent3", "accent4", "accent5", "accent6",
+        "hlink", "folHlink",
+    )
+    entries = {
+        entry.tag.rsplit("}", 1)[-1]: entry
+        for entry in scheme
+    }
     colors = []
-    for entry in scheme:
+    for name in color_names:
+        entry = entries.get(name)
+        if entry is None:
+            colors.append(None)
+            continue
         color = next(iter(entry), None)
         if color is None:
             colors.append(None)
@@ -262,6 +276,30 @@ def _number_format_signature(cell: Any) -> tuple[str, str | None]:
     return number_format, None
 
 
+def _alignment_horizontal(cell: Any) -> str | None:
+    horizontal = cell.alignment.horizontal
+    if horizontal in (None, "general"):
+        return "general"
+
+    value = cell.value
+    if (
+        horizontal == "left"
+        and isinstance(value, str)
+        and cell.data_type != "f"
+    ):
+        return "general"
+    if (
+        horizontal == "right"
+        and (
+            cell.is_date
+            or isinstance(value, (int, float))
+            and not isinstance(value, bool)
+        )
+    ):
+        return "general"
+    return horizontal
+
+
 def _style(cell: Any) -> dict[str, Any]:
     theme = cell.parent.parent.loaded_theme
     font = cell.font
@@ -286,7 +324,7 @@ def _style(cell: Any) -> dict[str, Any]:
             border.diagonalUp, border.diagonalDown, border.outline,
         ),
         "uitlijning": (
-            alignment.horizontal, alignment.vertical, alignment.textRotation,
+            _alignment_horizontal(cell), alignment.vertical, alignment.textRotation,
             alignment.wrapText, alignment.shrinkToFit, alignment.indent,
             alignment.relativeIndent, alignment.justifyLastLine,
             alignment.readingOrder,
@@ -617,10 +655,17 @@ def _format_style_summary(
         value = values[side]
         if category == "opvulling":
             fill_type, foreground, background, _ = value
-            description = "effen opvulling" if fill_type == "solid" else f"opvulling {fill_type}"
-            color = foreground or background
-            if color:
-                description += f", {_format_style_color(color)}"
+            if fill_type is None:
+                description = "geen opvulling"
+            else:
+                description = (
+                    "effen opvulling"
+                    if fill_type == "solid"
+                    else f"opvulling {fill_type}"
+                )
+                color = foreground or background
+                if color:
+                    description += f", {_format_style_color(color)}"
             summaries.append(description)
         elif category == "getalnotatie":
             number_format, builtin_name = value
@@ -721,10 +766,14 @@ def _coalesce_style_differences(
     by_signature: dict[tuple[str, str, str], list[tuple[int, int]]] = {}
     signature_values: dict[tuple[str, str, str], tuple[Any, Any]] = {}
     border_changes: dict[tuple[int, int], tuple[Any, Any]] = {}
+    alignment_changes: dict[tuple[int, int], tuple[Any, Any]] = {}
     for coordinate, changes in style_changes.items():
         for category, (expected, actual) in changes.items():
             if category == "rand":
                 border_changes[coordinate] = expected, actual
+                continue
+            if category == "uitlijning":
+                alignment_changes[coordinate] = expected, actual
                 continue
             signature = (category, repr(expected), repr(actual))
             by_signature.setdefault(signature, []).append(coordinate)
@@ -788,6 +837,62 @@ def _coalesce_style_differences(
                 1,
                 {category: (expected, actual)},
             ),
+            "Opmaak",
+        ))
+
+    remaining = set(alignment_changes)
+    while remaining:
+        seed = min(remaining)
+        remaining.remove(seed)
+        component = {seed}
+        pending = [seed]
+        while pending:
+            row, column = pending.pop()
+            for neighbor in (
+                (row - 1, column), (row + 1, column),
+                (row, column - 1), (row, column + 1),
+            ):
+                if neighbor in remaining:
+                    remaining.remove(neighbor)
+                    component.add(neighbor)
+                    pending.append(neighbor)
+
+        min_row = min(row for row, _ in component)
+        max_row = max(row for row, _ in component)
+        min_column = min(column for _, column in component)
+        max_column = max(column for _, column in component)
+        first = f"{get_column_letter(min_column)}{min_row}"
+        last = f"{get_column_letter(max_column)}{max_row}"
+        range_label = first if first == last else f"{first}:{last}"
+
+        def alignment_summary(side: int) -> str:
+            property_values: dict[str, list[str]] = {}
+            standalone_summaries = []
+            seen_standalone = set()
+            for coordinate in sorted(component):
+                expected, actual = alignment_changes[coordinate]
+                value, other = (expected, actual) if side == 0 else (actual, expected)
+                for summary in _format_alignment_summary(value, other).splitlines():
+                    if ": " in summary:
+                        property_name, property_value = summary.split(": ", 1)
+                        values = property_values.setdefault(property_name, [])
+                        if property_value not in values:
+                            values.append(property_value)
+                    elif summary not in seen_standalone:
+                        standalone_summaries.append(summary)
+                        seen_standalone.add(summary)
+            summaries = [
+                f"{property_name}: {', '.join(values)}"
+                for property_name, values in property_values.items()
+            ]
+            return "\n".join(summaries + standalone_summaries)
+
+        differences.append(Difference(
+            sheet,
+            f"Opmaak: uitlijning in bereik {range_label} "
+            f"({len(component)} {'cel' if len(component) == 1 else 'cellen'})",
+            alignment_summary(0),
+            alignment_summary(1),
             "Opmaak",
         ))
 
@@ -1894,6 +1999,12 @@ def compare_workbooks(reference_path: Path, student_path: Path) -> ComparisonRes
             left_style = _style(left)
             right_style = _style(right)
             for category, expected_style in left_style.items():
+                if (
+                    category == "uitlijning"
+                    and left.value is None
+                    and right.value is None
+                ):
+                    continue
                 if expected_style != right_style[category]:
                     style_changes.setdefault((row, column), {})[category] = (
                         expected_style, right_style[category]
@@ -2047,6 +2158,25 @@ def _report_item_label(difference: Difference) -> str:
 
 def write_report(result: ComparisonResult, output_path: Path) -> None:
     title = html.escape(result.student_file.stem)
+    scored_categories: set[str] = set()
+
+    def score_fields(category: str) -> str:
+        if category in scored_categories:
+            return ""
+        scored_categories.add(category)
+        escaped_category = html.escape(category, quote=True)
+        return (
+            f'<span class="inline-score" data-score-category="{escaped_category}">'
+            f'<label>Behaald <input type="number" min="0" step="any" '
+            f'aria-label="{escaped_category} behaalde punten" '
+            'data-score-field="earned"></label>'
+            '<span aria-hidden="true">/</span>'
+            f'<label>Maximum <input type="number" min="0" step="any" '
+            f'aria-label="{escaped_category} maximum punten" '
+            'data-score-field="maximum"></label>'
+            "</span>"
+        )
+
     if result.error:
         status = "Bestand niet beoordeeld"
         detail = f'<p class="error">{html.escape(result.error)}</p>'
@@ -2096,12 +2226,14 @@ def write_report(result: ComparisonResult, output_path: Path) -> None:
                         for subcategory, subcategory_differences in subcategories.items()
                     )
                     category_sections.append(
-                        f"<h3>{html.escape(category)}</h3>{format_sections}"
+                        f'<div class="category-heading"><h3>{html.escape(category)}</h3>'
+                        f"{score_fields(category)}</div>{format_sections}"
                     )
                     continue
 
                 category_sections.append(
-                    f"<h3>{html.escape(category)}</h3>"
+                    f'<div class="category-heading"><h3>{html.escape(category)}</h3>'
+                    f"{score_fields(category)}</div>"
                     + render_table(differences)
                 )
             sheet_sections.append(
@@ -2110,6 +2242,32 @@ def write_report(result: ComparisonResult, output_path: Path) -> None:
                 + "</section>"
             )
         detail = "<hr>".join(sheet_sections)
+    if result.error is None:
+        missing_score_categories = [
+            category for category in _REPORT_CATEGORIES
+            if category not in scored_categories
+        ]
+        if missing_score_categories:
+            fallback_sections = "".join(
+                f'<div class="category-heading"><h3>{html.escape(category)}</h3>'
+                f'<p class="no-differences">Geen meldingen in deze categorie.</p>'
+                f"{score_fields(category)}</div>"
+                for category in missing_score_categories
+            )
+            detail += (
+                '<section class="unreported-categories">'
+                "<h2>Andere te beoordelen onderdelen</h2>"
+                f"{fallback_sections}</section>"
+            )
+
+        score_key = html.escape(str(output_path.resolve()), quote=True)
+        detail += (
+            f'<section class="grading" data-score-key="{score_key}">'
+            "<h2>Totaalscore</h2>"
+            '<p class="score-total" aria-live="polite">— / —</p>'
+            '<p class="score-status" aria-live="polite"></p>'
+            "</section>"
+        )
     document = f"""<!doctype html>
 <html lang="nl"><meta charset="utf-8"><meta name="viewport" content="width=device-width">
 <title>Excel Checker - {title}</title>
@@ -2121,9 +2279,113 @@ h4{{font-size:1rem;margin:1rem 0 .2rem}}
 table{{border-collapse:collapse;width:100%;margin-top:1rem}}th,td{{border:1px solid #dadce0;padding:.6rem;text-align:left;vertical-align:top}}
 th{{background:#f1f3f4}}code{{white-space:pre-wrap;overflow-wrap:anywhere}}
 .color-swatch{{display:inline-block;width:50px;height:50px;border:1px solid #777;vertical-align:middle;margin:0 .25rem}}
+.category-heading{{display:flex;align-items:center;gap:1rem;flex-wrap:wrap}}
+.category-heading h3{{margin:.7rem 0}}
+.inline-score{{display:inline-flex;align-items:center;gap:.45rem;font-size:.9rem}}
+.inline-score label{{display:inline-flex;align-items:center;gap:.3rem}}
+.inline-score input{{box-sizing:border-box;width:5.5rem;padding:.25rem;font:inherit}}
+.no-differences{{margin:.4rem 0;color:#5f6368}}
+.score-total{{font-weight:700}}.score-status{{min-height:1.5em;color:#b3261e}}
+@media print{{.inline-score input{{border:0;padding:0}}}}
 </style>
 <h1>Controlerapport: {title}</h1><p><strong>Resultaat:</strong> {status}</p>
 {detail}
+<script>
+(() => {{
+  const grading = document.querySelector(".grading");
+  if (!grading) return;
+
+  const storageKey = "excel-checker-score:" + grading.dataset.scoreKey;
+  const groups = [...document.querySelectorAll(".inline-score")];
+  const fields = [...document.querySelectorAll(".inline-score input[data-score-field]")];
+  const total = grading.querySelector(".score-total");
+  const status = grading.querySelector(".score-status");
+
+  const format = (value) => value.toLocaleString("nl-BE", {{
+    maximumFractionDigits: 2
+  }});
+
+  const calculate = () => {{
+    let earnedTotal = 0;
+    let maximumTotal = 0;
+    let valid = true;
+    let complete = true;
+
+    for (const group of groups) {{
+      const earnedField = group.querySelector('[data-score-field="earned"]');
+      const maximumField = group.querySelector('[data-score-field="maximum"]');
+      const earnedEmpty = earnedField.value === "";
+      const maximumEmpty = maximumField.value === "";
+      const earned = earnedField.valueAsNumber;
+      const maximum = maximumField.valueAsNumber;
+      if (earnedEmpty || maximumEmpty) {{
+        complete = false;
+        earnedField.setCustomValidity("");
+        maximumField.setCustomValidity("");
+        continue;
+      }}
+      const rowValid =
+        Number.isFinite(earned) &&
+        Number.isFinite(maximum) &&
+        earned >= 0 &&
+        maximum >= 0 &&
+        earned <= maximum;
+
+      earnedField.setCustomValidity(
+        rowValid ? "" : "Vul geldige punten in; behaald kan niet hoger zijn dan het maximum."
+      );
+      maximumField.setCustomValidity(
+        rowValid ? "" : "Vul een geldig maximum in dat minstens gelijk is aan de behaalde punten."
+      );
+      valid = valid && rowValid;
+      if (rowValid) {{
+        earnedTotal += earned;
+        maximumTotal += maximum;
+      }}
+    }}
+
+    total.textContent = !valid
+      ? "Controleer de punteninvoer"
+      : complete
+        ? `${{format(earnedTotal)}} / ${{format(maximumTotal)}}`
+        : "— / —";
+    status.textContent = !valid
+      ? "Controleer de invoer: behaalde punten moeten tussen 0 en het maximum liggen."
+      : complete
+        ? "Punten worden automatisch in deze browser bewaard."
+        : "Vul per onderdeel de behaalde punten en het maximum in. Gebruik 0 als het onderdeel niet meetelt.";
+
+    try {{
+      localStorage.setItem(storageKey, JSON.stringify(
+        fields.map((field) => field.value)
+      ));
+    }} catch (error) {{
+      status.textContent =
+        "Opslaan in deze browser is niet beschikbaar: " + error.message;
+    }}
+  }};
+
+  try {{
+    const saved = localStorage.getItem(storageKey);
+    if (saved !== null) {{
+      const values = JSON.parse(saved);
+      if (Array.isArray(values) && values.length === fields.length) {{
+        fields.forEach((field, index) => {{
+          if (typeof values[index] === "string") field.value = values[index];
+        }});
+      }} else {{
+        status.textContent = "Opgeslagen scores konden niet worden hersteld.";
+      }}
+    }}
+  }} catch (error) {{
+    status.textContent =
+      "Opgeslagen scores konden niet worden gelezen: " + error.message;
+  }}
+
+  fields.forEach((field) => field.addEventListener("input", calculate));
+  calculate();
+}})();
+</script>
 </html>"""
     output_path.write_text(document, encoding="utf-8")
 

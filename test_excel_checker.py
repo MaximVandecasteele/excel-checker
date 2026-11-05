@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from copy import copy
+from datetime import date
 from pathlib import Path
 
 from openpyxl import Workbook, load_workbook
@@ -21,12 +22,14 @@ from excel_checker import (
     _column_dimension_signatures,
     _conditional_rule_signature,
     _cell_value,
+    _color,
     _format_column_differences,
     _format_row_differences,
     _format_cf_rule,
     _normalize_number_format,
     _row_dimension_signatures,
     _side,
+    _theme_color_values,
     _tinted_rgb,
     compare_workbooks,
     write_report,
@@ -840,6 +843,176 @@ class WorkbookComparisonTests(unittest.TestCase):
         self.assertNotIn("False", difference.expected + difference.actual)
         self.assertNotIn("None", difference.expected + difference.actual)
 
+    def test_alignment_differences_in_empty_cells_are_ignored(self):
+        for path, alignment in (
+            (self.reference, Alignment(horizontal="center")),
+            (self.student, Alignment(horizontal="right", wrap_text=True)),
+        ):
+            workbook = Workbook()
+            workbook.active["B4"].alignment = alignment
+            workbook.save(path)
+
+        result = compare_workbooks(self.reference, self.student)
+
+        self.assertFalse(any(
+            item.item.startswith("Opmaak: uitlijning")
+            for item in result.differences
+        ))
+
+    def test_default_horizontal_alignment_is_ignored_for_text_values(self):
+        for path, horizontal in (
+            (self.reference, None),
+            (self.student, "left"),
+        ):
+            workbook = Workbook()
+            cell = workbook.active["A1"]
+            cell.value = "Tekst"
+            cell.alignment = Alignment(horizontal=horizontal)
+            workbook.save(path)
+
+        result = compare_workbooks(self.reference, self.student)
+
+        self.assertFalse(any(
+            item.item.startswith("Opmaak: uitlijning")
+            for item in result.differences
+        ))
+
+    def test_default_horizontal_alignment_is_ignored_for_numbers_and_dates(self):
+        for path, horizontal in (
+            (self.reference, None),
+            (self.student, "right"),
+        ):
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet["A1"] = 123
+            sheet["A1"].alignment = Alignment(horizontal=horizontal)
+            sheet["A2"] = date(2026, 11, 5)
+            sheet["A2"].alignment = Alignment(horizontal=horizontal)
+            workbook.save(path)
+
+        result = compare_workbooks(self.reference, self.student)
+
+        self.assertFalse(any(
+            item.item.startswith("Opmaak: uitlijning")
+            for item in result.differences
+        ))
+
+    def test_nonstandard_horizontal_alignment_is_still_compared(self):
+        for path, horizontal in (
+            (self.reference, None),
+            (self.student, "center"),
+        ):
+            workbook = Workbook()
+            cell = workbook.active["A1"]
+            cell.value = "Tekst"
+            cell.alignment = Alignment(horizontal=horizontal)
+            workbook.save(path)
+
+        difference = next(
+            item for item in compare_workbooks(
+                self.reference, self.student
+            ).differences
+            if item.item.startswith("Opmaak: uitlijning")
+        )
+
+        self.assertIn("horizontaal", difference.expected)
+        self.assertIn("centreren", difference.actual)
+
+    def test_default_horizontal_alignment_normalization_does_not_ignore_vertical(self):
+        for path, alignment in (
+            (self.reference, Alignment(horizontal=None, vertical="center")),
+            (self.student, Alignment(horizontal="left", vertical="top")),
+        ):
+            workbook = Workbook()
+            workbook.active["A1"] = "Tekst"
+            workbook.active["A1"].alignment = alignment
+            workbook.save(path)
+
+        difference = next(
+            item for item in compare_workbooks(
+                self.reference, self.student
+            ).differences
+            if item.item.startswith("Opmaak: uitlijning")
+        )
+
+        self.assertEqual(difference.expected, "verticaal: midden")
+        self.assertEqual(difference.actual, "verticaal: bovenaan")
+
+    def test_adjacent_alignment_differences_are_grouped_by_contiguous_range(self):
+        for path, alignments in (
+            (
+                self.reference,
+                {
+                    "A1": Alignment(horizontal="center"),
+                    "A2": Alignment(horizontal="center"),
+                    "C5": Alignment(horizontal="center"),
+                },
+            ),
+            (
+                self.student,
+                {
+                    "A1": Alignment(horizontal="left"),
+                    "A2": Alignment(horizontal="right"),
+                    "C5": Alignment(horizontal="right"),
+                },
+            ),
+        ):
+            workbook = Workbook()
+            for coordinate, alignment in alignments.items():
+                workbook.active[coordinate] = "Tekst"
+                workbook.active[coordinate].alignment = alignment
+            workbook.save(path)
+
+        differences = [
+            item for item in compare_workbooks(
+                self.reference, self.student
+            ).differences
+            if item.item.startswith("Opmaak: uitlijning")
+        ]
+
+        self.assertEqual(len(differences), 2)
+        grouped = next(item for item in differences if "A1:A2" in item.item)
+        isolated = next(item for item in differences if "C5" in item.item)
+        self.assertIn("2 cellen", grouped.item)
+        self.assertEqual(grouped.expected, "horizontaal: centreren")
+        self.assertEqual(grouped.actual, "horizontaal: standaard, rechts")
+        self.assertEqual(isolated.expected, "horizontaal: centreren")
+        self.assertEqual(isolated.actual, "horizontaal: rechts")
+
+    def test_grouped_alignment_summary_does_not_repeat_same_property(self):
+        for path, alignments in (
+            (
+                self.reference,
+                (
+                    Alignment(horizontal="center"),
+                    Alignment(horizontal="center"),
+                ),
+            ),
+            (
+                self.student,
+                (
+                    Alignment(horizontal="left", wrap_text=True),
+                    Alignment(horizontal="left"),
+                ),
+            ),
+        ):
+            workbook = Workbook()
+            for row, alignment in enumerate(alignments, start=1):
+                cell = workbook.active.cell(row, 1, "Tekst")
+                cell.alignment = alignment
+            workbook.save(path)
+
+        difference = next(
+            item for item in compare_workbooks(
+                self.reference, self.student
+            ).differences
+            if item.item.startswith("Opmaak: uitlijning")
+        )
+
+        self.assertEqual(difference.actual.count("horizontaal: standaard"), 1)
+        self.assertIn("horizontaal: standaard", difference.actual)
+        self.assertIn("tekstterugloop", difference.actual)
+
     def test_contiguous_rectangle_border_changes_are_reported_as_one_range(self):
         for path, has_border in (
             (self.reference, True),
@@ -900,6 +1073,22 @@ class WorkbookComparisonTests(unittest.TestCase):
         self.assertEqual(_tinted_rgb("BAED9D", -0.254), "7CDE47")
         self.assertEqual(_tinted_rgb("8077C7", -0.639), "262152")
 
+    def test_theme_color_indices_follow_excel_theme_slot_order(self):
+        Workbook().save(self.reference)
+        workbook = load_workbook(self.reference)
+        theme_colors = _theme_color_values(workbook.loaded_theme)
+
+        self.assertEqual(theme_colors[0], "FFFFFF")
+        self.assertEqual(theme_colors[1], "000000")
+        self.assertEqual(theme_colors[2], "EEECE1")
+        self.assertEqual(theme_colors[3], "1F497D")
+        self.assertEqual(
+            _color(Color(type="theme", theme=0, tint=-0.1499984740745262),
+                   workbook.loaded_theme),
+            ("theme", 0, -0.1499984740745262, "D9D9D9"),
+        )
+        workbook.close()
+
     def test_theme_fill_colors_are_reported_as_rgb(self):
         for path, fill in (
             (self.reference, PatternFill()),
@@ -925,6 +1114,53 @@ class WorkbookComparisonTests(unittest.TestCase):
         self.assertRegex(difference.actual, r"#[0-9A-F]{6}")
         self.assertNotIn("themakleur", difference.actual)
         self.assertNotIn("tint", difference.actual)
+
+    def test_no_fill_is_not_reported_as_a_black_fill(self):
+        for path, fill in (
+            (self.reference, PatternFill()),
+            (
+                self.student,
+                PatternFill(fill_type="solid", fgColor="FFFFFFCC"),
+            ),
+        ):
+            workbook = Workbook()
+            workbook.active["J10"] = "Inhoud"
+            workbook.active["J10"].fill = fill
+            workbook.save(path)
+
+        difference = next(
+            item for item in compare_workbooks(
+                self.reference, self.student
+            ).differences
+            if item.item.startswith("Opmaak: opvulling")
+        )
+
+        self.assertEqual(difference.expected, "geen opvulling")
+        self.assertEqual(difference.actual, "effen opvulling, #FFFFCC")
+
+    def test_fill_and_border_differences_in_empty_cells_are_checked(self):
+        for path, has_fill, has_border in (
+            (self.reference, False, False),
+            (self.student, True, True),
+        ):
+            workbook = Workbook()
+            cell = workbook.active["J10"]
+            if has_fill:
+                cell.fill = PatternFill(fill_type="solid", fgColor="FFFFFFCC")
+            if has_border:
+                cell.border = Border(bottom=Side(style="medium"))
+            workbook.save(path)
+
+        result = compare_workbooks(self.reference, self.student)
+
+        self.assertTrue(any(
+            item.item.startswith("Opmaak: opvulling")
+            for item in result.differences
+        ))
+        self.assertTrue(any(
+            item.item.startswith("Opmaak: rand")
+            for item in result.differences
+        ))
 
     def test_html_report_displays_color_swatch_for_font_and_fill(self):
         for path, color in (
@@ -987,6 +1223,43 @@ class WorkbookComparisonTests(unittest.TestCase):
                         report.index("<h3>Invoer data (inhoud)</h3>"))
         self.assertIn("</section><hr><section", report)
         self.assertNotIn("<th>Werkblad</th>", report)
+
+    def test_html_report_allows_per_exam_scoring_and_persists_it(self):
+        result = ComparisonResult(
+            self.student,
+            [
+                Difference("Data", "Opmaak: lettertype", "vet", "normaal",
+                           "Opmaak"),
+            ],
+        )
+        report_path = self.directory / "punten.html"
+
+        write_report(result, report_path)
+
+        report = report_path.read_text(encoding="utf-8")
+        for category in (
+            "Opmaak",
+            "Functies / berekeningen",
+            "Invoer data (inhoud)",
+            "Sorteren/filteren",
+            "Afdrukeigenschappen",
+            "Grafieken",
+        ):
+            self.assertIn(f'aria-label="{category} behaalde punten"', report)
+            self.assertIn(f'aria-label="{category} maximum punten"', report)
+        self.assertIn("Totaalscore", report)
+        self.assertIn("excel-checker-score:", report)
+        self.assertIn("localStorage.setItem", report)
+        self.assertIn("localStorage.getItem", report)
+        self.assertIn("score-total", report)
+        self.assertIn("earnedTotal", report)
+        self.assertIn("maximumTotal", report)
+        self.assertIn(
+            '<div class="category-heading"><h3>Opmaak</h3>'
+            '<span class="inline-score" data-score-category="Opmaak">',
+            report,
+        )
+        self.assertNotIn('<table class="score-table"', report)
 
     def test_copied_formula_errors_in_a_row_are_grouped(self):
         for path, multiplier in ((self.reference, 2), (self.student, 3)):
@@ -1083,6 +1356,7 @@ class WorkbookComparisonTests(unittest.TestCase):
             workbook = Workbook()
             sheet = workbook.active
             for column in range(1, 5):
+                sheet.cell(1, column, "Tekst")
                 sheet.cell(1, column).fill = PatternFill(
                     fill_type="solid", fgColor=color
                 )
@@ -1103,6 +1377,7 @@ class WorkbookComparisonTests(unittest.TestCase):
             workbook = Workbook()
             sheet = workbook.active
             for row in range(1, 5):
+                sheet.cell(row, 2, "Tekst")
                 sheet.cell(row, 2).font = Font(bold=bold)
             workbook.save(path)
 
@@ -1121,6 +1396,7 @@ class WorkbookComparisonTests(unittest.TestCase):
             workbook = Workbook()
             sheet = workbook.active
             for coordinate in ("A1", "B1", "D1", "E1", "A3", "B3"):
+                sheet[coordinate] = "Tekst"
                 sheet[coordinate].fill = PatternFill(
                     fill_type="solid", fgColor=color
                 )
@@ -1145,6 +1421,7 @@ class WorkbookComparisonTests(unittest.TestCase):
             (self.student, 4, 0.8),
         ):
             workbook = Workbook()
+            workbook.active["A1"] = "Tekst"
             workbook.active["A1"].fill = PatternFill(
                 fill_type="solid",
                 fgColor=Color(type="theme", theme=theme, tint=tint),
@@ -1165,6 +1442,7 @@ class WorkbookComparisonTests(unittest.TestCase):
     def test_isolated_formatting_error_is_not_grouped(self):
         for path, color in ((self.reference, "FFFF0000"), (self.student, "FF0000FF")):
             workbook = Workbook()
+            workbook.active["B1"] = "Tekst"
             workbook.active["B1"].fill = PatternFill(
                 fill_type="solid", fgColor=color
             )
