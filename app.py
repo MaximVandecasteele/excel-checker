@@ -4,20 +4,25 @@ import math
 import queue
 import threading
 import tkinter as tk
+import webbrowser
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from openpyxl import load_workbook
 
 from excel_checker import SCORING_PARTS, check_folder
+from pdf_exporter import convert_html_reports, find_html_reports
+from report_server import make_report_server
 
 
 class ExcelCheckerApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title("Excel Checker")
-        self.root.geometry("850x760")
+        self.root.geometry("900x820")
         self.messages: queue.Queue[tuple[str, object]] = queue.Queue()
+        self.report_server = None
+        self.report_server_thread: threading.Thread | None = None
 
         self.reference = tk.StringVar()
         self.students = tk.StringVar()
@@ -72,6 +77,28 @@ class ExcelCheckerApp:
         self.progress = ttk.Progressbar(buttons, mode="indeterminate", length=180)
         self.progress.pack(side="left", padx=12)
 
+        report_tools = ttk.LabelFrame(frame, text="Rapporten")
+        report_tools.pack(fill="x", pady=(8, 4))
+        self.server_button = ttk.Button(
+            report_tools,
+            text="Open rapporten en vul scores in",
+            command=self._start_report_server,
+        )
+        self.server_button.pack(side="left", padx=8, pady=8)
+        self.stop_server_button = ttk.Button(
+            report_tools,
+            text="Stop rapportserver",
+            command=self._stop_report_server,
+            state="disabled",
+        )
+        self.stop_server_button.pack(side="left", padx=(0, 8), pady=8)
+        self.pdf_button = ttk.Button(
+            report_tools,
+            text="Exporteer rapporten naar PDF",
+            command=self._start_pdf_export,
+        )
+        self.pdf_button.pack(side="left", padx=(0, 8), pady=8)
+
         ttk.Separator(frame).pack(fill="x", pady=8)
         ttk.Label(frame, textvariable=self.status, wraplength=620).pack(anchor="w")
         ttk.Label(
@@ -83,6 +110,7 @@ class ExcelCheckerApp:
             foreground="#555",
         ).pack(anchor="w", pady=(12, 0))
         self.root.after(100, self._poll_messages)
+        self.root.protocol("WM_DELETE_WINDOW", self._close)
 
     def _file_row(self, parent: ttk.Frame, label: str, variable: tk.StringVar, command: object) -> None:
         row = ttk.Frame(parent)
@@ -251,24 +279,141 @@ class ExcelCheckerApp:
         except Exception as exc:
             self.messages.put(("error", str(exc)))
 
+    def _start_report_server(self) -> None:
+        output = Path(self.output.get())
+        if not output.is_dir() or not find_html_reports(output):
+            messagebox.showerror(
+                "Geen rapporten",
+                "Maak eerst de rapporten aan met ‘Start vergelijken’.",
+            )
+            return
+        if self.report_server is not None:
+            address = f"http://127.0.0.1:{self.report_server.server_port}/"
+            webbrowser.open(address)
+            self.status.set(f"Rapportserver actief:\n{address}")
+            return
+        try:
+            self.report_server = make_report_server(output)
+        except OSError as exc:
+            messagebox.showerror("Server niet beschikbaar", str(exc))
+            return
+
+        self.report_server_thread = threading.Thread(
+            target=self.report_server.serve_forever,
+            daemon=True,
+        )
+        self.report_server_thread.start()
+        address = f"http://127.0.0.1:{self.report_server.server_port}/"
+        self.server_button.configure(state="disabled")
+        self.stop_server_button.configure(state="normal")
+        self.status.set(f"Rapportserver actief:\n{address}")
+        if not webbrowser.open(address):
+            messagebox.showinfo(
+                "Rapportserver actief",
+                f"Open dit adres in je browser:\n{address}",
+            )
+
+    def _stop_report_server(self) -> None:
+        server = self.report_server
+        if server is None:
+            return
+        self.report_server = None
+        self.server_button.configure(state="normal")
+        self.stop_server_button.configure(state="disabled")
+        threading.Thread(
+            target=self._shutdown_report_server,
+            args=(server,),
+            daemon=True,
+        ).start()
+        self.status.set("Rapportserver wordt gestopt…")
+
+    def _shutdown_report_server(self, server: object) -> None:
+        server.shutdown()
+        server.server_close()
+        self.messages.put(("server_stopped", None))
+
+    def _start_pdf_export(self) -> None:
+        source = Path(self.output.get())
+        if not source.is_dir() or not find_html_reports(source):
+            messagebox.showerror(
+                "Geen rapporten",
+                "Maak eerst de rapporten aan met ‘Start vergelijken’.",
+            )
+            return
+        destination = filedialog.askdirectory(
+            title="Kies de map voor de PDF-rapporten",
+            initialdir=str(source / "PDF") if (source / "PDF").is_dir() else str(source),
+        )
+        if not destination:
+            return
+        output = Path(destination)
+        reports = find_html_reports(source)
+        self.pdf_button.configure(state="disabled")
+        self.progress.configure(mode="determinate", maximum=len(reports), value=0)
+        self.status.set(f"{len(reports)} rapport(en) worden naar PDF omgezet…")
+        threading.Thread(
+            target=self._run_pdf_export,
+            args=(source, output),
+            daemon=True,
+        ).start()
+
+    def _run_pdf_export(self, source: Path, output: Path) -> None:
+        try:
+            def report_progress(index: int, total: int, report: Path) -> None:
+                self.messages.put(("pdf_progress", (index, total, report.name)))
+
+            paths = convert_html_reports(source, output, report_progress)
+            self.messages.put(("pdf_done", (paths, output)))
+        except Exception as exc:
+            self.messages.put(("pdf_error", str(exc)))
+
     def _poll_messages(self) -> None:
         try:
             kind, payload = self.messages.get_nowait()
         except queue.Empty:
             self.root.after(100, self._poll_messages)
             return
-        self.progress.stop()
-        self.run_button.configure(state="normal")
+        if kind in {"done", "error"}:
+            self.progress.stop()
+            self.run_button.configure(state="normal")
         if kind == "error":
             self.status.set("Het vergelijken is niet gelukt.")
             messagebox.showerror("Fout bij vergelijken", str(payload))
         else:
-            reports, output = payload
-            if reports:
-                self.status.set(f"{len(reports)} rapport(en) opgeslagen in:\n{output}")
-            else:
-                self.status.set(f"Geen .xlsx-leerlingbestanden gevonden in:\n{self.students.get()}")
+            if kind == "done":
+                reports, output = payload
+                if reports:
+                    self.status.set(f"{len(reports)} rapport(en) opgeslagen in:\n{output}")
+                else:
+                    self.status.set(f"Geen .xlsx-leerlingbestanden gevonden in:\n{self.students.get()}")
+            elif kind == "pdf_progress":
+                index, total, filename = payload
+                self.progress.configure(value=index)
+                self.status.set(f"PDF {index}/{total}: {filename}")
+            elif kind == "pdf_done":
+                self.progress.configure(value=len(payload[0]))
+                self.pdf_button.configure(state="normal")
+                self.status.set(
+                    f"{len(payload[0])} PDF-bestand(en) opgeslagen in:\n{payload[1]}"
+                )
+            elif kind == "pdf_error":
+                self.pdf_button.configure(state="normal")
+                self.status.set("Het omzetten naar PDF is niet gelukt.")
+                messagebox.showerror(
+                    "Fout bij PDF-export",
+                    f"{payload}\n\nControleer of Chromium is geïnstalleerd met:\n"
+                    "python3 -m playwright install chromium",
+                )
+            elif kind == "server_stopped":
+                self.status.set("Rapportserver is gestopt.")
         self.root.after(100, self._poll_messages)
+
+    def _close(self) -> None:
+        if self.report_server is not None:
+            self.report_server.shutdown()
+            self.report_server.server_close()
+            self.report_server = None
+        self.root.destroy()
 
 
 def main() -> None:

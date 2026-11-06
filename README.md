@@ -13,24 +13,17 @@ python3 app.py
 
 Kies in de app de modeloplossing, de map met leerlingbestanden en de map voor de rapporten. Alleen `.xlsx`-bestanden op het hoogste niveau van de gekozen leerlingenmap worden verwerkt. Excel-tijdelijke bestanden worden overgeslagen.
 
-Selecteer eerst de modeloplossing; de GUI leest de werkbladen automatisch in. Stel vervolgens per werkblad en beoordelingsonderdeel het maximumaantal punten in. Lege velden worden niet beoordeeld en verschijnen niet in het rapport. Onderdelen zonder gevonden fouten krijgen automatisch de maximumscore. Voor onderdelen met fouten vul je de behaalde punten direct naast de titel in; een leeg veld telt als nul en de maxima kunnen niet worden gewijzigd. De totaalscore over alle werkbladen verschijnt onderaan en de scores worden lokaal in de browser bewaard. Klik op **Bewaar rapport met scores** om een HTML-kopie met de scores op te slaan. Chrome en Edge tonen hiervoor een bestandskiezer waarmee je het rapport kunt overschrijven; in browsers zonder deze mogelijkheid wordt een HTML-kopie gedownload.
+Selecteer eerst de modeloplossing; de GUI leest de werkbladen automatisch in. Stel vervolgens per werkblad en beoordelingsonderdeel het maximumaantal punten in. Lege velden worden niet beoordeeld en verschijnen niet in het rapport. Onderdelen zonder gevonden fouten krijgen automatisch de maximumscore. Voor onderdelen met fouten vul je de behaalde punten direct naast de titel in; een leeg veld telt als nul en de maxima kunnen niet worden gewijzigd. De totaalscore over alle werkbladen verschijnt onderaan.
 
-Wil je rapporten rechtstreeks in hun map opslaan, start dan de lokale rapportviewer:
+Na het vergelijken gebruik je in dezelfde GUI de knop **Open rapporten en vul scores in**. Dat start een lokale rapportviewer in je browser; ingevulde scores worden automatisch in de HTML-rapporten bijgewerkt en als reserve opgeslagen in `.excel_checker_scores/` in de rapportmap. Klik op **Stop rapportserver** wanneer je klaar bent. De server is alleen vanaf deze computer bereikbaar.
 
-```bash
-python3 report_server.py
-```
-
-Kies de map met rapporten en klik **Open rapporten**. De rapporten openen via een lokaal adres; zolang de viewer actief is, worden scores automatisch zowel in de HTML-bestanden als in `.excel_checker_scores/` in dezelfde map opgeslagen. Daardoor blijven ze bewaard en zijn ze ook beschikbaar voor de PDF-exporter. Sluit de viewer wanneer je klaar bent; hij is alleen vanaf deze computer bereikbaar.
-
-Zet zulke HTML-kopieën daarna om naar aparte PDF-bestanden met:
+Klik op **Exporteer rapporten naar PDF** om de HTML-rapporten in de gekozen rapportmap naar aparte PDF-bestanden om te zetten. Kies de uitvoermap wanneer daarom wordt gevraagd. Dit vereist een eenmalige installatie van Chromium:
 
 ```bash
 python3 -m playwright install chromium
-python3 pdf_exporter.py
 ```
 
-In de PDF-export-GUI kies je de map met opgeslagen HTML-rapporten en een uitvoermap voor de PDF's. Playwright gebruikt Chromium om rapporten lokaal te renderen; er is geen internetverbinding nodig tijdens het omzetten. De knop **Opslaan als PDF** in het rapport blijft ook beschikbaar om een rapport afzonderlijk via de browser af te drukken.
+Playwright gebruikt Chromium om rapporten lokaal te renderen; er is geen internetverbinding nodig tijdens het omzetten. De knoppen **Bewaar rapport met scores** en **Opslaan als PDF** in het rapport blijven ook beschikbaar.
 
 ## Tests uitvoeren
 
