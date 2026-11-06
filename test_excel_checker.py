@@ -1305,19 +1305,11 @@ class WorkbookComparisonTests(unittest.TestCase):
         self.assertIn("earnedTotal", report)
         self.assertIn("maximumTotal", report)
         self.assertIn('field.value === "" ? 0 : field.valueAsNumber', report)
-        self.assertIn('class="pdf-button"', report)
-        self.assertIn('class="save-report-button"', report)
-        self.assertIn("onclick=\"window.print()\"", report)
-        self.assertIn(".pdf-button{display:none}", report)
-        self.assertIn(".save-report-button{display:none}", report)
+        self.assertNotIn('class="pdf-button"', report)
+        self.assertNotIn('class="save-report-button"', report)
+        self.assertNotIn("Opslaan als PDF", report)
+        self.assertNotIn("Bewaar rapport met scores", report)
         self.assertIn('data-score-print="0"', report)
-        self.assertIn("window.print()", report)
-        self.assertIn('class="save-report-button"', report)
-        self.assertIn("snapshotGrading.dataset.scoresEmbedded = \"true\"", report)
-        self.assertIn('setAttribute("value", field.value)', report)
-        self.assertIn("window.showSaveFilePicker", report)
-        self.assertIn("await writable.write(blob)", report)
-        self.assertIn("browser ondersteunt lokaal overschrijven niet", report)
         heading_position = report.index("<h3>Opmaak</h3>")
         score_position = report.index('aria-label="Data — Opmaak behaalde punten"')
         total_position = report.index("<h2>Totaalscore</h2>")
@@ -1453,20 +1445,37 @@ class WorkbookComparisonTests(unittest.TestCase):
             report_path,
             {"Data": {"Invoer data (inhoud)": 3}},
         )
+        (self.directory / "z_rapport.html").write_text(
+            "<!doctype html><html><h1>Tweede rapport</h1></html>",
+            encoding="utf-8",
+        )
         server = make_report_server(self.directory)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         base_url = f"http://127.0.0.1:{server.server_port}"
         try:
             with urlopen(f"{base_url}/") as response:
-                self.assertIn("server_rapport", response.read().decode("utf-8"))
+                overview = response.read().decode("utf-8")
+                self.assertIn("server_rapport", overview)
+                self.assertIn("data-report-name=\"server_rapport.html\"", overview)
+                self.assertIn("status.complete", overview)
             with urlopen(f"{base_url}/reports/{report_path.name}") as response:
+                report_page = response.read().decode("utf-8")
                 self.assertIn(
                     'data-score-file="server_rapport.html"',
-                    response.read().decode("utf-8"),
+                    report_page,
                 )
+                self.assertIn("1 / 2", report_page)
+                self.assertEqual(report_page.count('class="report-navigation"'), 2)
+                self.assertIn("← Overzicht", report_page)
+                self.assertIn("Volgende toets →", report_page)
+                self.assertIn("href=\"/reports/z_rapport.html\"", report_page)
+                self.assertIn("@media print{.report-navigation{display:none!important}}", report_page)
             with urlopen(f"{base_url}/api/scores/{report_path.name}") as response:
-                self.assertEqual(json.load(response), {"scores": []})
+                self.assertEqual(
+                    json.load(response),
+                    {"scores": [], "complete": False},
+                )
 
             request = Request(
                 f"{base_url}/api/scores/{report_path.name}",
@@ -1476,6 +1485,11 @@ class WorkbookComparisonTests(unittest.TestCase):
             )
             with urlopen(request) as response:
                 self.assertEqual(json.load(response), {"saved": True})
+            with urlopen(f"{base_url}/api/scores/{report_path.name}") as response:
+                self.assertEqual(
+                    json.load(response),
+                    {"scores": ["2.5"], "complete": True},
+                )
             saved_report = report_path.read_text(encoding="utf-8")
             self.assertIn('data-scores-embedded="true"', saved_report)
             self.assertIn('id="score-0"', saved_report)

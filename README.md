@@ -15,7 +15,7 @@ Kies in de app de modeloplossing, de map met leerlingbestanden en de map voor de
 
 Selecteer eerst de modeloplossing; de GUI leest de werkbladen automatisch in. Stel vervolgens per werkblad en beoordelingsonderdeel het maximumaantal punten in. Lege velden worden niet beoordeeld en verschijnen niet in het rapport. Onderdelen zonder gevonden fouten krijgen automatisch de maximumscore. Voor onderdelen met fouten vul je de behaalde punten direct naast de titel in; een leeg veld telt als nul en de maxima kunnen niet worden gewijzigd. De totaalscore over alle werkbladen verschijnt onderaan.
 
-Na het vergelijken gebruik je in dezelfde GUI de knop **Open rapporten en vul scores in**. Dat start een lokale rapportviewer in je browser; ingevulde scores worden automatisch in de HTML-rapporten bijgewerkt en als reserve opgeslagen in `.excel_checker_scores/` in de rapportmap. Klik op **Stop rapportserver** wanneer je klaar bent. De server is alleen vanaf deze computer bereikbaar.
+Na het vergelijken gebruik je in dezelfde GUI de knop **Open rapporten en vul scores in**. Dat start een lokale rapportviewer in je browser. Boven- en onderaan elk rapport kun je naar de vorige of volgende toets gaan; de navigatie loopt door van de laatste naar de eerste en omgekeerd. Via **Overzicht** keer je terug naar de klaslijst. Een rapportlink licht groen op zodra alle scores zijn ingevuld. Bovenaan rechts staat de positie in de klas, bijvoorbeeld `2 / 7`. Ingevulde scores worden automatisch opgeslagen in de HTML-rapporten en als reserve in `.excel_checker_scores/` in de rapportmap. Klik op **Stop rapportserver** wanneer je klaar bent. De server is alleen vanaf deze computer bereikbaar.
 
 Klik op **Exporteer rapporten naar PDF** om de HTML-rapporten in de gekozen rapportmap naar aparte PDF-bestanden om te zetten. Kies de uitvoermap wanneer daarom wordt gevraagd. Dit vereist een eenmalige installatie van Chromium:
 
@@ -23,7 +23,7 @@ Klik op **Exporteer rapporten naar PDF** om de HTML-rapporten in de gekozen rapp
 python3 -m playwright install chromium
 ```
 
-Playwright gebruikt Chromium om rapporten lokaal te renderen; er is geen internetverbinding nodig tijdens het omzetten. De knoppen **Bewaar rapport met scores** en **Opslaan als PDF** in het rapport blijven ook beschikbaar.
+Playwright gebruikt Chromium om rapporten lokaal te renderen; er is geen internetverbinding nodig tijdens het omzetten. De navigatiebediening van de rapportviewer wordt niet in PDF-bestanden afgedrukt.
 
 ## Tests uitvoeren
 

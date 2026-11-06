@@ -2331,11 +2331,6 @@ def write_report(
             '<p class="score-status" aria-live="polite"></p>'
             "</section></main>"
         )
-    pdf_button = (
-        '<button class="pdf-button" type="button" onclick="window.print()">'
-        "Opslaan als PDF</button>"
-        if result.error is None and scoring_parts else ""
-    )
     document = f"""<!doctype html>
 <html lang="nl"><meta charset="utf-8"><meta name="viewport" content="width=device-width">
 <title>Excel Checker - {title}</title>
@@ -2352,18 +2347,14 @@ th{{background:#f1f3f4}}code{{white-space:pre-wrap;overflow-wrap:anywhere}}
 .inline-score{{display:inline-flex;align-items:center;gap:.35rem;font-size:.9rem}}
 .inline-score input{{box-sizing:border-box;width:5rem;padding:.2rem;font:inherit}}
 .print-score{{display:none}}
-.pdf-button,.save-report-button{{padding:.5rem .8rem;font:inherit;cursor:pointer}}
 .no-differences{{margin:.4rem 0;color:#5f6368}}
 .score-total{{font-weight:700}}.score-status{{min-height:1.5em;color:#b3261e}}
 @media print{{
-  .pdf-button{{display:none}}
-  .save-report-button{{display:none}}
   .inline-score input{{display:none}}
   .print-score{{display:inline}}
 }}
 </style>
-<h1>Controlerapport: {title}</h1><p><strong>Resultaat:</strong> {status}</p>{pdf_button}
-{('<button class="save-report-button" type="button">Bewaar rapport met scores</button>' if result.error is None and scoring_parts else '')}
+<h1>Controlerapport: {title}</h1><p><strong>Resultaat:</strong> {status}</p>
 {grading_start}{detail}{grading_end}
 <script>
 (() => {{
@@ -2511,54 +2502,6 @@ th{{background:#f1f3f4}}code{{white-space:pre-wrap;overflow-wrap:anywhere}}
   fields.forEach((field) => field.addEventListener("input", calculate));
   calculate();
 
-  const saveButton = document.querySelector(".save-report-button");
-  if (saveButton) {{
-    saveButton.addEventListener("click", async () => {{
-      const snapshot = document.documentElement.cloneNode(true);
-      const snapshotGrading = snapshot.querySelector(".grading");
-      snapshotGrading.dataset.scoresEmbedded = "true";
-      const snapshotFields = [
-        ...snapshotGrading.querySelectorAll('input[data-score-field="earned"]')
-      ];
-      fields.forEach((field, index) => {{
-        snapshotFields[index].setAttribute("value", field.value);
-      }});
-      const blob = new Blob(
-        ["<!doctype html>\\n", snapshot.outerHTML],
-        {{ type: "text/html;charset=utf-8" }}
-      );
-      const filename =
-        document.title.replace(/[^\\w.-]+/g, "_") + "_met_scores.html";
-      if (window.showSaveFilePicker) {{
-        try {{
-          const handle = await window.showSaveFilePicker({{
-            suggestedName: filename,
-            types: [{{
-              description: "HTML-rapport",
-              accept: {{ "text/html": [".html"] }}
-            }}]
-          }});
-          const writable = await handle.createWritable();
-          await writable.write(blob);
-          await writable.close();
-          status.textContent = "Rapport met scores opgeslagen.";
-        }} catch (error) {{
-          if (error.name !== "AbortError") {{
-            status.textContent =
-              "Rapport opslaan is niet gelukt: " + error.message;
-          }}
-        }}
-        return;
-      }}
-      const link = document.createElement("a");
-      link.href = URL.createObjectURL(blob);
-      link.download = filename;
-      link.click();
-      setTimeout(() => URL.revokeObjectURL(link.href), 1000);
-      status.textContent =
-        "De browser ondersteunt lokaal overschrijven niet; rapport met scores gedownload.";
-    }});
-  }}
 }})();
 </script>
 </html>"""

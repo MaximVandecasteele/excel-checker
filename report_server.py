@@ -12,7 +12,7 @@ from html.parser import HTMLParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
-from urllib.parse import unquote, urlsplit
+from urllib.parse import quote, unquote, urlsplit
 from typing import Any
 
 
@@ -24,6 +24,7 @@ class _ScoreInputParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__()
         self.maxima: list[float] = []
+        self.defaults: list[str] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag != "input":
@@ -37,12 +38,19 @@ class _ScoreInputParser(HTMLParser):
             return
         if math.isfinite(maximum) and maximum > 0:
             self.maxima.append(maximum)
+            self.defaults.append(attributes.get("value") or "")
 
 
 def _read_report_maxima(report_path: Path) -> list[float]:
     parser = _ScoreInputParser()
     parser.feed(report_path.read_text(encoding="utf-8"))
     return parser.maxima
+
+
+def _read_report_score_defaults(report_path: Path) -> list[str]:
+    parser = _ScoreInputParser()
+    parser.feed(report_path.read_text(encoding="utf-8"))
+    return parser.defaults
 
 
 def _persist_report_scores(report_path: Path, scores: list[str]) -> None:
@@ -104,6 +112,12 @@ def make_report_server(
             return candidate
         return None
 
+    def list_reports() -> list[Path]:
+        return sorted(
+            path for path in report_folder.iterdir()
+            if path.is_file() and path.suffix.lower() in {".html", ".htm"}
+        )
+
     class ReportRequestHandler(BaseHTTPRequestHandler):
         server_version = "ExcelCheckerReportServer"
 
@@ -123,15 +137,35 @@ def make_report_server(
             body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
             self._send(status, "application/json; charset=utf-8", body)
 
+        @staticmethod
+        def _navigation(
+            reports: list[Path],
+            index: int,
+            include_counter: bool,
+        ) -> str:
+            previous = reports[(index - 1) % len(reports)]
+            following = reports[(index + 1) % len(reports)]
+            counter = (
+                f'<span class="report-counter">{index + 1} / {len(reports)}</span>'
+                if include_counter else ""
+            )
+            return (
+                '<nav class="report-navigation" aria-label="Rapportnavigatie">'
+                f'<a class="report-button" href="/reports/{quote(previous.name)}">'
+                "← Vorige toets</a>"
+                '<a class="report-button" href="/">← Overzicht</a>'
+                f'<a class="report-button" href="/reports/{quote(following.name)}">'
+                f"Volgende toets →</a>{counter}</nav>"
+            )
+
         def do_GET(self) -> None:
             request = urlsplit(self.path)
             if request.path == "/":
-                reports = sorted(
-                    path for path in report_folder.iterdir()
-                    if path.is_file() and path.suffix.lower() in {".html", ".htm"}
-                )
+                reports = list_reports()
                 links = "".join(
-                    f'<li><a href="/reports/{escape(path.name, quote=True)}">'
+                    f'<li><a class="report-link" '
+                    f'data-report-name="{escape(path.name, quote=True)}" '
+                    f'href="/reports/{quote(path.name)}">'
                     f"{escape(path.stem)}</a></li>"
                     for path in reports
                 )
@@ -140,10 +174,20 @@ def make_report_server(
                     "<meta name=\"viewport\" content=\"width=device-width\">"
                     "<title>Excel Checker — rapporten</title>"
                     "<style>body{font:16px/1.5 system-ui,sans-serif;max-width:900px;"
-                    "margin:2rem auto;padding:0 1rem}li{margin:.5rem 0}</style>"
+                    "margin:2rem auto;padding:0 1rem}li{margin:.5rem 0}"
+                    ".report-link.completed{color:#137333;font-weight:700}</style>"
                     "<h1>Excel Checker — rapporten</h1>"
                     "<p>Scores worden automatisch op deze computer opgeslagen.</p>"
                     f"<ul>{links or '<li>Geen HTML-rapporten gevonden.</li>'}</ul>"
+                    "<script>"
+                    "document.querySelectorAll('.report-link').forEach(async link=>{"
+                    "try{const response=await fetch('/api/scores/'+"
+                    "encodeURIComponent(link.dataset.reportName));"
+                    "if(!response.ok)throw new Error('Scorestatus niet beschikbaar.');"
+                    "const status=await response.json();"
+                    "if(status.complete)link.classList.add('completed');"
+                    "}catch(error){console.error(error);}});"
+                    "</script>"
                     "</html>"
                 ).encode("utf-8")
                 self._send(200, "text/html; charset=utf-8", page)
@@ -156,11 +200,35 @@ def make_report_server(
                     self._send(404, "text/plain; charset=utf-8", b"Rapport niet gevonden.")
                     return
                 try:
-                    body = report_path.read_bytes()
+                    body = report_path.read_text(encoding="utf-8")
                 except OSError:
                     self._send(500, "text/plain; charset=utf-8", b"Rapport kon niet worden gelezen.")
                     return
-                self._send(200, "text/html; charset=utf-8", body)
+                reports = list_reports()
+                index = reports.index(report_path)
+                navigation = self._navigation(reports, index, True)
+                bottom_navigation = self._navigation(reports, index, False)
+                report_style = (
+                    "<style>"
+                    ".report-navigation{display:flex;align-items:center;gap:.6rem;"
+                    "flex-wrap:wrap;margin:1rem 0 1.5rem}"
+                    ".report-button{display:inline-block;padding:.45rem .75rem;"
+                    "border:1px solid #dadce0;border-radius:.35rem;color:#202124;"
+                    "text-decoration:none;background:#f8f9fa}"
+                    ".report-button:hover{background:#e8eaed}"
+                    ".report-counter{margin-left:auto;font-weight:700;white-space:nowrap}"
+                    "@media print{.report-navigation{display:none!important}}"
+                    "</style>"
+                )
+                insertion = body.lower().find("<h1")
+                if insertion >= 0:
+                    body = body[:insertion] + report_style + navigation + body[insertion:]
+                script_position = body.lower().find("<script")
+                if script_position >= 0:
+                    body = body[:script_position] + bottom_navigation + body[script_position:]
+                else:
+                    body += bottom_navigation
+                self._send(200, "text/html; charset=utf-8", body.encode("utf-8"))
                 return
 
             if request.path.startswith("/api/scores/"):
@@ -178,7 +246,17 @@ def make_report_server(
                     except (OSError, json.JSONDecodeError, KeyError, TypeError):
                         self._send_json(500, {"error": "Opgeslagen scores konden niet worden gelezen."})
                         return
-                self._send_json(200, {"scores": scores})
+                    try:
+                        defaults = _read_report_score_defaults(report_path)
+                    except (OSError, UnicodeDecodeError):
+                        self._send_json(500, {"error": "Rapportscores konden niet worden gelezen."})
+                        return
+                completion_scores = scores if len(scores) == len(defaults) else defaults
+                complete = bool(completion_scores) and all(
+                    isinstance(score, str) and score.strip() != ""
+                    for score in completion_scores
+                )
+                self._send_json(200, {"scores": scores, "complete": complete})
                 return
 
             self._send(404, "text/plain; charset=utf-8", b"Niet gevonden.")

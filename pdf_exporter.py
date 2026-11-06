@@ -95,7 +95,7 @@ class PdfExporterApp:
         ttk.Label(
             frame,
             text="Elke HTML krijgt een afzonderlijke PDF. De HTML-kopieën die je met "
-                 "‘Bewaar rapport met scores’ hebt opgeslagen, bevatten de toegekende scores.",
+                 "de rapportviewer hebt beoordeeld, bevatten de opgeslagen scores.",
             wraplength=620,
             foreground="#555",
         ).pack(anchor="w", pady=(10, 0))
