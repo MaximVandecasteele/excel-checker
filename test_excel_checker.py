@@ -1459,6 +1459,7 @@ class WorkbookComparisonTests(unittest.TestCase):
                 self.assertIn("server_rapport", overview)
                 self.assertIn("data-report-name=\"server_rapport.html\"", overview)
                 self.assertIn("status.complete", overview)
+                self.assertIn("Beëindig evaluatie", overview)
             with urlopen(f"{base_url}/reports/{report_path.name}") as response:
                 report_page = response.read().decode("utf-8")
                 self.assertIn(
@@ -1470,6 +1471,7 @@ class WorkbookComparisonTests(unittest.TestCase):
                 self.assertIn("← Overzicht", report_page)
                 self.assertIn("Volgende toets →", report_page)
                 self.assertIn("href=\"/reports/z_rapport.html\"", report_page)
+                self.assertEqual(report_page.count("Beëindig evaluatie"), 2)
                 self.assertIn("@media print{.report-navigation{display:none!important}}", report_page)
             with urlopen(f"{base_url}/api/scores/{report_path.name}") as response:
                 self.assertEqual(
@@ -1513,6 +1515,40 @@ class WorkbookComparisonTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
             thread.join(timeout=2)
+
+    def test_report_viewer_can_end_evaluation_and_rejects_cross_origin(self):
+        report_path = self.directory / "rapport.html"
+        report_path.write_text("<!doctype html><html><h1>Rapport</h1></html>", encoding="utf-8")
+        server = make_report_server(self.directory)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base_url = f"http://127.0.0.1:{server.server_port}"
+        try:
+            request = Request(
+                f"{base_url}/api/shutdown",
+                data=b"",
+                headers={"Origin": "https://example.com"},
+                method="POST",
+            )
+            with self.assertRaises(HTTPError) as error:
+                urlopen(request)
+            self.assertEqual(error.exception.code, 403)
+
+            request = Request(
+                f"{base_url}/api/shutdown",
+                data=b"",
+                headers={"Origin": base_url},
+                method="POST",
+            )
+            with urlopen(request) as response:
+                self.assertEqual(json.load(response), {"stopping": True})
+            thread.join(timeout=2)
+            self.assertFalse(thread.is_alive())
+        finally:
+            if thread.is_alive():
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
 
     def test_copied_formula_errors_in_a_row_are_grouped(self):
         for path, multiplier in ((self.reference, 2), (self.student, 3)):

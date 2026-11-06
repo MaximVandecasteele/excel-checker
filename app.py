@@ -85,13 +85,6 @@ class ExcelCheckerApp:
             command=self._start_report_server,
         )
         self.server_button.pack(side="left", padx=8, pady=8)
-        self.stop_server_button = ttk.Button(
-            report_tools,
-            text="Stop rapportserver",
-            command=self._stop_report_server,
-            state="disabled",
-        )
-        self.stop_server_button.pack(side="left", padx=(0, 8), pady=8)
         self.pdf_button = ttk.Button(
             report_tools,
             text="Exporteer rapporten naar PDF",
@@ -293,7 +286,10 @@ class ExcelCheckerApp:
             self.status.set(f"Rapportserver actief:\n{address}")
             return
         try:
-            self.report_server = make_report_server(output)
+            self.report_server = make_report_server(
+                output,
+                on_shutdown=lambda: self.messages.put(("server_stopped", None)),
+            )
         except OSError as exc:
             messagebox.showerror("Server niet beschikbaar", str(exc))
             return
@@ -305,32 +301,12 @@ class ExcelCheckerApp:
         self.report_server_thread.start()
         address = f"http://127.0.0.1:{self.report_server.server_port}/"
         self.server_button.configure(state="disabled")
-        self.stop_server_button.configure(state="normal")
         self.status.set(f"Rapportserver actief:\n{address}")
         if not webbrowser.open(address):
             messagebox.showinfo(
                 "Rapportserver actief",
                 f"Open dit adres in je browser:\n{address}",
             )
-
-    def _stop_report_server(self) -> None:
-        server = self.report_server
-        if server is None:
-            return
-        self.report_server = None
-        self.server_button.configure(state="normal")
-        self.stop_server_button.configure(state="disabled")
-        threading.Thread(
-            target=self._shutdown_report_server,
-            args=(server,),
-            daemon=True,
-        ).start()
-        self.status.set("Rapportserver wordt gestopt…")
-
-    def _shutdown_report_server(self, server: object) -> None:
-        server.shutdown()
-        server.server_close()
-        self.messages.put(("server_stopped", None))
 
     def _start_pdf_export(self) -> None:
         source = Path(self.output.get())
@@ -405,6 +381,9 @@ class ExcelCheckerApp:
                     "python3 -m playwright install chromium",
                 )
             elif kind == "server_stopped":
+                self.report_server = None
+                self.report_server_thread = None
+                self.server_button.configure(state="normal")
                 self.status.set("Rapportserver is gestopt.")
         self.root.after(100, self._poll_messages)
 

@@ -13,7 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from urllib.parse import quote, unquote, urlsplit
-from typing import Any
+from typing import Any, Callable
 
 
 _MAX_REQUEST_BYTES = 64 * 1024
@@ -96,6 +96,7 @@ def make_report_server(
     report_folder: Path,
     host: str = "127.0.0.1",
     port: int = 0,
+    on_shutdown: Callable[[], None] | None = None,
 ) -> ThreadingHTTPServer:
     report_folder = report_folder.resolve()
     score_lock = threading.Lock()
@@ -155,7 +156,10 @@ def make_report_server(
                 "← Vorige toets</a>"
                 '<a class="report-button" href="/">← Overzicht</a>'
                 f'<a class="report-button" href="/reports/{quote(following.name)}">'
-                f"Volgende toets →</a>{counter}</nav>"
+                f"Volgende toets →</a>"
+                '<button type="button" class="report-button end-evaluation">'
+                "Beëindig evaluatie</button>"
+                f"{counter}</nav>"
             )
 
         def do_GET(self) -> None:
@@ -175,9 +179,14 @@ def make_report_server(
                     "<title>Excel Checker — rapporten</title>"
                     "<style>body{font:16px/1.5 system-ui,sans-serif;max-width:900px;"
                     "margin:2rem auto;padding:0 1rem}li{margin:.5rem 0}"
-                    ".report-link.completed{color:#137333;font-weight:700}</style>"
+                    ".report-link.completed{color:#137333;font-weight:700}"
+                    ".end-evaluation{margin:1rem 0;padding:.5rem .8rem;font:inherit;"
+                    "cursor:pointer}"
+                    "@media print{.end-evaluation{display:none!important}}</style>"
                     "<h1>Excel Checker — rapporten</h1>"
                     "<p>Scores worden automatisch op deze computer opgeslagen.</p>"
+                    '<button type="button" class="end-evaluation">'
+                    "Beëindig evaluatie</button>"
                     f"<ul>{links or '<li>Geen HTML-rapporten gevonden.</li>'}</ul>"
                     "<script>"
                     "document.querySelectorAll('.report-link').forEach(async link=>{"
@@ -187,6 +196,15 @@ def make_report_server(
                     "const status=await response.json();"
                     "if(status.complete)link.classList.add('completed');"
                     "}catch(error){console.error(error);}});"
+                    "document.querySelectorAll('.end-evaluation').forEach(button=>{"
+                    "button.addEventListener('click',async()=>{"
+                    "if(!window.confirm('Wil je de evaluatie beëindigen?'))return;"
+                    "button.disabled=true;"
+                    "try{const response=await fetch('/api/shutdown',{method:'POST'});"
+                    "if(!response.ok)throw new Error('Evaluatie beëindigen is niet gelukt.');"
+                    "document.body.innerHTML='<h1>Evaluatie beëindigd</h1>';"
+                    "}catch(error){button.disabled=false;window.alert(error.message);}"
+                    "});});"
                     "</script>"
                     "</html>"
                 ).encode("utf-8")
@@ -217,6 +235,7 @@ def make_report_server(
                     "text-decoration:none;background:#f8f9fa}"
                     ".report-button:hover{background:#e8eaed}"
                     ".report-counter{margin-left:auto;font-weight:700;white-space:nowrap}"
+                    ".end-evaluation{font:inherit;cursor:pointer}"
                     "@media print{.report-navigation{display:none!important}}"
                     "</style>"
                 )
@@ -228,6 +247,20 @@ def make_report_server(
                     body = body[:script_position] + bottom_navigation + body[script_position:]
                 else:
                     body += bottom_navigation
+                body = body.replace(
+                    "</html>",
+                    "<script>"
+                    "document.querySelectorAll('.end-evaluation').forEach(button=>{"
+                    "button.addEventListener('click',async()=>{"
+                    "if(!window.confirm('Wil je de evaluatie beëindigen?'))return;"
+                    "button.disabled=true;"
+                    "try{const response=await fetch('/api/shutdown',{method:'POST'});"
+                    "if(!response.ok)throw new Error('Evaluatie beëindigen is niet gelukt.');"
+                    "document.body.innerHTML='<h1>Evaluatie beëindigd</h1>';"
+                    "}catch(error){button.disabled=false;window.alert(error.message);}"
+                    "});});"
+                    "</script></html>",
+                )
                 self._send(200, "text/html; charset=utf-8", body.encode("utf-8"))
                 return
 
@@ -263,6 +296,25 @@ def make_report_server(
 
         def do_POST(self) -> None:
             request = urlsplit(self.path)
+            if request.path == "/api/shutdown":
+                origin = urlsplit(self.headers.get("Origin", ""))
+                if (
+                    origin.scheme != "http"
+                    or origin.netloc != self.headers.get("Host")
+                ):
+                    self._send_json(403, {"error": "Ongeldige herkomst."})
+                    return
+                self._send_json(200, {"stopping": True})
+
+                def stop_server() -> None:
+                    self.server.shutdown()
+                    self.server.server_close()
+                    if on_shutdown is not None:
+                        on_shutdown()
+
+                threading.Thread(target=stop_server, daemon=True).start()
+                return
+
             if not request.path.startswith("/api/scores/"):
                 self._send_json(404, {"error": "Niet gevonden."})
                 return
@@ -356,10 +408,6 @@ class ReportServerApp:
         buttons.pack(fill="x", pady=(16, 8))
         self.start_button = ttk.Button(buttons, text="Open rapporten", command=self._start)
         self.start_button.pack(side="left")
-        self.stop_button = ttk.Button(
-            buttons, text="Server stoppen", command=self._stop, state="disabled"
-        )
-        self.stop_button.pack(side="left", padx=8)
         ttk.Label(frame, textvariable=self.status, wraplength=620).pack(
             anchor="w", pady=(8, 0)
         )
@@ -391,7 +439,10 @@ class ReportServerApp:
             return
 
         try:
-            self.server = make_report_server(folder)
+            self.server = make_report_server(
+                folder,
+                on_shutdown=lambda: self.messages.put(("server_stopped", None)),
+            )
         except OSError as exc:
             messagebox.showerror("Server niet beschikbaar", str(exc))
             return
@@ -400,9 +451,22 @@ class ReportServerApp:
         address = f"http://127.0.0.1:{self.server.server_port}/"
         self.status.set(f"Rapportviewer actief:\n{address}")
         self.start_button.configure(state="disabled")
-        self.stop_button.configure(state="normal")
+        self.root.after(100, self._poll_messages)
         if not webbrowser.open(address):
             self.status.set(f"Open dit adres in je browser:\n{address}")
+
+    def _poll_messages(self) -> None:
+        try:
+            kind, _payload = self.messages.get_nowait()
+        except queue.Empty:
+            if self.server is not None:
+                self.root.after(100, self._poll_messages)
+            return
+        if kind == "server_stopped":
+            self.server = None
+            self.server_thread = None
+            self.start_button.configure(state="normal")
+            self.status.set("De evaluatie is beëindigd.")
 
     def _stop(self) -> None:
         if self.server is not None:
@@ -411,7 +475,6 @@ class ReportServerApp:
             self.server = None
         self.server_thread = None
         self.start_button.configure(state="normal")
-        self.stop_button.configure(state="disabled")
         self.status.set("De lokale rapportviewer is gestopt.")
 
     def _close(self) -> None:
