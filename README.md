@@ -11,7 +11,7 @@ python3 -m pip install -r requirements.txt
 python3 app.py
 ```
 
-Kies in de app de modeloplossing, de map met leerlingbestanden en de map voor de rapporten. Alleen `.xlsx`-bestanden op het hoogste niveau van de gekozen leerlingenmap worden verwerkt. Excel-tijdelijke bestanden worden overgeslagen.
+Kies in de app de modeloplossing, de hoofdmap met leerlingbestanden en de map voor de rapporten. Vul eventueel de gewenste tekenreeks in waarop de bestandsnaam moet eindigen, zonder `.xlsx`; die extensie wordt verondersteld. Alleen `.xlsx`-bestanden die aan dit einde voldoen worden verwerkt. Laat het veld leeg om alle `.xlsx`-bestanden in de gekozen map en onderliggende mappen te verwerken. Excel-tijdelijke bestanden worden overgeslagen. De rapportbestandsnamen bevatten de mapstructuur zodat bestanden met dezelfde naam herkenbaar blijven.
 
 Selecteer eerst de modeloplossing; de GUI leest de werkbladen automatisch in. Stel vervolgens per werkblad en beoordelingsonderdeel het maximumaantal punten in. Lege velden worden niet beoordeeld en verschijnen niet in het rapport. Onderdelen zonder gevonden fouten krijgen automatisch de maximumscore. Voor onderdelen met fouten vul je de behaalde punten direct naast de titel in; een leeg veld telt als nul en de maxima kunnen niet worden gewijzigd. De totaalscore over alle werkbladen verschijnt onderaan.
 

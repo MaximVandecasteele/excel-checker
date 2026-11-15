@@ -38,11 +38,55 @@ from excel_checker import (
     _theme_color_values,
     _tinted_rgb,
     compare_workbooks,
+    check_folder,
     write_report,
 )
 
 
 class WorkbookComparisonTests(unittest.TestCase):
+    def test_check_folder_finds_workbooks_in_subfolders_and_uses_relative_paths(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            reference = root / "model.xlsx"
+            student_folder = root / "leerlingen"
+            output_folder = root / "rapporten"
+            for path, value in (
+                (reference, "model"),
+                (student_folder / "Leerling A" / "Oefeningen" / "hoofdstuk.xlsx", "A"),
+                (student_folder / "Leerling B" / "Oefeningen" / "hoofdstuk.xlsx", "B"),
+                (student_folder / "toets.xlsx", "toets"),
+            ):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                workbook = Workbook()
+                workbook.active["A1"] = value
+                workbook.save(path)
+            (student_folder / "Leerling A" / "Oefeningen" / "~$tijdelijk.xlsx").touch()
+
+            reports = check_folder(reference, student_folder, output_folder)
+
+            self.assertEqual(len(reports), 3)
+            self.assertEqual(
+                {report.name for report in reports},
+                {
+                    "Leerling_A_Oefeningen_hoofdstuk_rapport.html",
+                    "Leerling_B_Oefeningen_hoofdstuk_rapport.html",
+                    "toets_rapport.html",
+                },
+            )
+            matching_reports = check_folder(
+                reference,
+                student_folder,
+                root / "gefilterde_rapporten",
+                filename_suffix="HOOFDSTUK",
+            )
+            self.assertEqual(
+                {report.name for report in matching_reports},
+                {
+                    "Leerling_A_Oefeningen_hoofdstuk_rapport.html",
+                    "Leerling_B_Oefeningen_hoofdstuk_rapport.html",
+                },
+            )
+
     def test_missing_border_side_is_supported(self):
         self.assertIsNone(_side(None))
         self.assertIsNone(_side(Side()))
@@ -1313,8 +1357,8 @@ class WorkbookComparisonTests(unittest.TestCase):
         heading_position = report.index("<h3>Opmaak</h3>")
         score_position = report.index('aria-label="Data — Opmaak behaalde punten"')
         total_position = report.index("<h2>Totaalscore</h2>")
+        self.assertLess(total_position, heading_position)
         self.assertLess(heading_position, score_position)
-        self.assertLess(score_position, total_position)
 
     def test_unscored_parts_are_hidden_from_the_report(self):
         result = ComparisonResult(

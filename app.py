@@ -26,6 +26,7 @@ class ExcelCheckerApp:
 
         self.reference = tk.StringVar()
         self.students = tk.StringVar()
+        self.filename_suffix = tk.StringVar()
         self.output = tk.StringVar()
         self.status = tk.StringVar(value="Kies de modeloplossing en de map met leerlingbestanden.")
         self.scoring_vars: dict[str, dict[str, tk.StringVar]] = {}
@@ -35,12 +36,20 @@ class ExcelCheckerApp:
         ttk.Label(frame, text="Excel Checker", font=("", 20, "bold")).pack(anchor="w")
         ttk.Label(
             frame,
-            text="Vergelijk .xlsx-bestanden en maak een helder HTML-rapport per leerling.",
+            text="Vergelijk .xlsx-bestanden in de gekozen map en submappen; "
+                 "maak een helder HTML-rapport per bestand.",
             wraplength=620,
         ).pack(anchor="w", pady=(4, 18))
 
         self._file_row(frame, "Modeloplossing (.xlsx)", self.reference, self._choose_reference)
         self._file_row(frame, "Map met leerlingbestanden", self.students, self._choose_students)
+        suffix_row = ttk.Frame(frame)
+        suffix_row.pack(fill="x", pady=6)
+        ttk.Label(suffix_row, text="Bestandsnaam eindigt op", width=25).pack(side="left", anchor="w")
+        ttk.Entry(suffix_row, textvariable=self.filename_suffix).pack(
+            side="left", fill="x", expand=True, padx=8,
+        )
+        ttk.Label(suffix_row, text="(.xlsx wordt toegevoegd)").pack(side="right")
         self._file_row(frame, "Map voor rapporten", self.output, self._choose_output)
 
         scoring_frame = ttk.LabelFrame(frame, text="Puntenverdeling (maximum per onderdeel)")
@@ -185,7 +194,9 @@ class ExcelCheckerApp:
         self.scoring_rows.columnconfigure(0, weight=1)
 
     def _choose_students(self) -> None:
-        path = filedialog.askdirectory(title="Kies de map met leerlingbestanden")
+        path = filedialog.askdirectory(
+            title="Kies de map met leerlingbestanden (submappen worden meegenomen)"
+        )
         if path:
             self.students.set(path)
             if not self.output.get():
@@ -233,7 +244,7 @@ class ExcelCheckerApp:
         self.status.set("Bestanden worden vergeleken…")
         threading.Thread(
             target=self._run_comparison,
-            args=(reference, students, output, scoring_parts),
+            args=(reference, students, output, scoring_parts, self.filename_suffix.get().strip()),
             daemon=True,
         ).start()
 
@@ -265,9 +276,16 @@ class ExcelCheckerApp:
         students: Path,
         output: Path,
         scoring_parts: dict[str, dict[str, float]],
+        filename_suffix: str,
     ) -> None:
         try:
-            reports = check_folder(reference, students, output, scoring_parts)
+            reports = check_folder(
+                reference,
+                students,
+                output,
+                scoring_parts,
+                filename_suffix,
+            )
             self.messages.put(("done", (reports, output)))
         except Exception as exc:
             self.messages.put(("error", str(exc)))
@@ -361,7 +379,10 @@ class ExcelCheckerApp:
                 if reports:
                     self.status.set(f"{len(reports)} rapport(en) opgeslagen in:\n{output}")
                 else:
-                    self.status.set(f"Geen .xlsx-leerlingbestanden gevonden in:\n{self.students.get()}")
+                    self.status.set(
+                        f"Geen overeenkomende .xlsx-leerlingbestanden gevonden in:\n"
+                        f"{self.students.get()}"
+                    )
             elif kind == "pdf_progress":
                 index, total, filename = payload
                 self.progress.configure(value=index)

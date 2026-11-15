@@ -2316,6 +2316,7 @@ def write_report(
             )
         detail = "<hr>".join(sheet_sections)
     grading_start = ""
+    grading_summary = ""
     grading_end = ""
     if result.error is None and scoring_parts:
         score_key = html.escape(str(output_path.resolve()), quote=True)
@@ -2324,13 +2325,14 @@ def write_report(
             f'<main class="grading" data-score-key="{score_key}" '
             f'data-score-file="{report_name}">'
         )
-        grading_end = (
+        grading_summary = (
             '<section class="score-summary">'
             "<h2>Totaalscore</h2>"
             '<p class="score-total" aria-live="polite"></p>'
             '<p class="score-status" aria-live="polite"></p>'
-            "</section></main>"
+            "</section>"
         )
+        grading_end = "</main>"
     document = f"""<!doctype html>
 <html lang="nl"><meta charset="utf-8"><meta name="viewport" content="width=device-width">
 <title>Excel Checker - {title}</title>
@@ -2355,7 +2357,7 @@ th{{background:#f1f3f4}}code{{white-space:pre-wrap;overflow-wrap:anywhere}}
 }}
 </style>
 <h1>Controlerapport: {title}</h1><p><strong>Resultaat:</strong> {status}</p>
-{grading_start}{detail}{grading_end}
+{grading_start}{grading_summary}{detail}{grading_end}
 <script>
 (() => {{
   const grading = document.querySelector(".grading");
@@ -2513,19 +2515,23 @@ def check_folder(
     student_folder: Path,
     output_folder: Path,
     scoring_parts: dict[str, dict[str, float]] | None = None,
+    filename_suffix: str = "",
 ) -> list[Path]:
     output_folder.mkdir(parents=True, exist_ok=True)
+    filename_suffix = filename_suffix.casefold()
     student_files = sorted(
-        path for path in student_folder.iterdir()
+        path for path in student_folder.rglob("*")
         if path.is_file()
         and path.suffix.lower() == ".xlsx"
+        and path.stem.casefold().endswith(filename_suffix)
         and not path.name.startswith("~$")
         and path.resolve() != reference_path.resolve()
     )
     report_paths: list[Path] = []
     used_names: dict[str, int] = {}
     for student_file in student_files:
-        base = _safe_filename(student_file.stem)
+        relative_stem = student_file.relative_to(student_folder).with_suffix("")
+        base = _safe_filename(str(relative_stem))
         used_names[base] = used_names.get(base, 0) + 1
         suffix = f"_{used_names[base]}" if used_names[base] > 1 else ""
         report_path = output_folder / f"{base}{suffix}_rapport.html"
