@@ -10,9 +10,9 @@ from tkinter import filedialog, messagebox, ttk
 
 from openpyxl import load_workbook
 
-from excel_checker import SCORING_PARTS, check_folder
-from pdf_exporter import convert_html_reports, find_html_reports
-from report_server import make_report_server
+from Excel.excel_checker import SCORING_PARTS, check_folder
+from Shared.pdf_exporter import convert_html_reports, find_html_reports
+from Shared.report_server import make_report_server
 
 
 class ExcelCheckerApp:

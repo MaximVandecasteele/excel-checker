@@ -2,13 +2,17 @@
 
 Een lokale desktopapp voor het vergelijken van een modeloplossing met `.xlsx`-bestanden van leerlingen. De app maakt voor elk leerlingbestand een afzonderlijk HTML-rapport dat je in een browser kunt openen.
 
+## Opbouw
+
+De map `Excel/` bevat de Excel-app, de werkmapvergelijker, de Excel-specifieke tests en de Excel-afhankelijkheid `openpyxl`. `Word/` is gereserveerd voor een latere zelfstandige Word-app. De map `shared/` bevat de herbruikbare documentworkflow, rapportviewer en PDF-export. De workflow krijgt een documentvergelijker en rapportgenerator als functies mee, zodat beide apps dezelfde algemene verwerking kunnen gebruiken met eigen documenttype-specifieke code.
+
 ## Starten
 
 Vereist Python 3.10 of hoger.
 
 ```bash
-python3 -m pip install -r requirements.txt
-python3 app.py
+python3 -m pip install -r Excel/requirements.txt
+python3 -m Excel.app
 ```
 
 Kies in de app de modeloplossing, de hoofdmap met leerlingbestanden en de map voor de rapporten. Vul eventueel de gewenste tekenreeks in waarop de bestandsnaam moet eindigen, zonder `.xlsx`; die extensie wordt verondersteld. Alleen `.xlsx`-bestanden die aan dit einde voldoen worden verwerkt. Laat het veld leeg om alle `.xlsx`-bestanden in de gekozen map en onderliggende mappen te verwerken. Excel-tijdelijke bestanden worden overgeslagen. De rapportbestandsnamen bevatten de mapstructuur zodat bestanden met dezelfde naam herkenbaar blijven.
@@ -28,7 +32,7 @@ Playwright gebruikt Chromium om rapporten lokaal te renderen; er is geen interne
 ## Tests uitvoeren
 
 ```bash
-python3 -m pip install -r requirements.txt
+python3 -m pip install -r Excel/requirements.txt
 python3 -m unittest -v
 ```
 

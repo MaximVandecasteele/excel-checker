@@ -20,9 +20,9 @@ from openpyxl.styles.differential import DifferentialStyle
 from openpyxl.worksheet.filters import FilterColumn, Filters, SortCondition, SortState
 from openpyxl.worksheet.table import Table
 
-from pdf_exporter import find_html_reports
-from report_server import make_report_server
-from excel_checker import (
+from Shared.pdf_exporter import find_html_reports
+from Shared.report_server import make_report_server
+from Excel.excel_checker import (
     ComparisonResult,
     Difference,
     _column_dimension_signatures,

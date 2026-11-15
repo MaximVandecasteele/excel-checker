@@ -120,7 +120,7 @@ def make_report_server(
         )
 
     class ReportRequestHandler(BaseHTTPRequestHandler):
-        server_version = "ExcelCheckerReportServer"
+        server_version = "DocumentCheckerReportServer"
 
         def log_message(self, _format: str, *_args: Any) -> None:
             return
@@ -176,14 +176,14 @@ def make_report_server(
                 page = (
                     "<!doctype html><html lang=\"nl\"><meta charset=\"utf-8\">"
                     "<meta name=\"viewport\" content=\"width=device-width\">"
-                    "<title>Excel Checker — rapporten</title>"
+                    "<title>Document Checker — rapporten</title>"
                     "<style>body{font:16px/1.5 system-ui,sans-serif;max-width:900px;"
                     "margin:2rem auto;padding:0 1rem}li{margin:.5rem 0}"
                     ".report-link.completed{color:#137333;font-weight:700}"
                     ".end-evaluation{margin:1rem 0;padding:.5rem .8rem;font:inherit;"
                     "cursor:pointer}"
                     "@media print{.end-evaluation{display:none!important}}</style>"
-                    "<h1>Excel Checker — rapporten</h1>"
+                    "<h1>Document Checker — rapporten</h1>"
                     "<p>Scores worden automatisch op deze computer opgeslagen.</p>"
                     '<button type="button" class="end-evaluation">'
                     "Beëindig evaluatie</button>"
@@ -383,7 +383,7 @@ def make_report_server(
 class ReportServerApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
-        self.root.title("Excel Checker - rapporten en scores")
+        self.root.title("Document Checker - rapporten en scores")
         self.root.geometry("680x300")
         self.messages: queue.Queue[tuple[str, object]] = queue.Queue()
         self.report_folder = tk.StringVar()

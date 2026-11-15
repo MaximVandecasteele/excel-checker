@@ -62,7 +62,7 @@ def convert_html_reports(
 class PdfExporterApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
-        self.root.title("Excel Checker - PDF-export")
+        self.root.title("Document Checker - PDF-export")
         self.root.geometry("680x280")
         self.messages: queue.Queue[tuple[str, object]] = queue.Queue()
 

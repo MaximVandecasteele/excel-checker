@@ -9,6 +9,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from Shared.document_workflow import review_folder
 from openpyxl import load_workbook
 from openpyxl.utils import (
     get_column_letter,
@@ -2101,10 +2102,6 @@ def compare_workbooks(reference_path: Path, student_path: Path) -> ComparisonRes
     return ComparisonResult(student_path, differences)
 
 
-def _safe_filename(name: str) -> str:
-    return re.sub(r"[^\w.-]+", "_", name, flags=re.UNICODE).strip("._") or "leerling"
-
-
 def _report_value(item: str, value: str) -> str:
     if not item.startswith(("Opmaak: lettertype", "Opmaak: opvulling")):
         return html.escape(value)
@@ -2517,28 +2514,15 @@ def check_folder(
     scoring_parts: dict[str, dict[str, float]] | None = None,
     filename_suffix: str = "",
 ) -> list[Path]:
-    output_folder.mkdir(parents=True, exist_ok=True)
-    filename_suffix = filename_suffix.casefold()
-    student_files = sorted(
-        path for path in student_folder.rglob("*")
-        if path.is_file()
-        and path.suffix.lower() == ".xlsx"
-        and path.stem.casefold().endswith(filename_suffix)
-        and not path.name.startswith("~$")
-        and path.resolve() != reference_path.resolve()
+    def write_excel_report(result: ComparisonResult, report_path: Path) -> None:
+        write_report(result, report_path, scoring_parts)
+
+    return review_folder(
+        reference_path,
+        student_folder,
+        output_folder,
+        file_extension=".xlsx",
+        compare=compare_workbooks,
+        write_report=write_excel_report,
+        filename_suffix=filename_suffix,
     )
-    report_paths: list[Path] = []
-    used_names: dict[str, int] = {}
-    for student_file in student_files:
-        relative_stem = student_file.relative_to(student_folder).with_suffix("")
-        base = _safe_filename(str(relative_stem))
-        used_names[base] = used_names.get(base, 0) + 1
-        suffix = f"_{used_names[base]}" if used_names[base] > 1 else ""
-        report_path = output_folder / f"{base}{suffix}_rapport.html"
-        write_report(
-            compare_workbooks(reference_path, student_file),
-            report_path,
-            scoring_parts,
-        )
-        report_paths.append(report_path)
-    return report_paths
