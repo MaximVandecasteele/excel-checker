@@ -25,11 +25,14 @@ class _ScoreInputParser(HTMLParser):
         super().__init__()
         self.maxima: list[float] = []
         self.defaults: list[str] = []
+        self.revision: str | None = None
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attributes = dict(attrs)
+        if tag == "main" and "grading" in (attributes.get("class") or "").split():
+            self.revision = attributes.get("data-score-revision")
         if tag != "input":
             return
-        attributes = dict(attrs)
         if attributes.get("data-score-field") != "earned":
             return
         try:
@@ -51,6 +54,12 @@ def _read_report_score_defaults(report_path: Path) -> list[str]:
     parser = _ScoreInputParser()
     parser.feed(report_path.read_text(encoding="utf-8"))
     return parser.defaults
+
+
+def _read_report_score_revision(report_path: Path) -> str | None:
+    parser = _ScoreInputParser()
+    parser.feed(report_path.read_text(encoding="utf-8"))
+    return parser.revision
 
 
 def _persist_report_scores(report_path: Path, scores: list[str]) -> None:
@@ -273,17 +282,26 @@ def make_report_server(
                 score_path = _score_file(report_folder, report_path.name)
                 with score_lock:
                     try:
-                        scores = json.loads(score_path.read_text(encoding="utf-8"))["scores"]
+                        saved_scores = json.loads(
+                            score_path.read_text(encoding="utf-8")
+                        )
+                        if not isinstance(saved_scores, dict):
+                            raise TypeError("Opgeslagen scores hebben geen geldig formaat.")
+                        scores = saved_scores["scores"]
                     except FileNotFoundError:
+                        saved_scores = {}
                         scores = []
                     except (OSError, json.JSONDecodeError, KeyError, TypeError):
                         self._send_json(500, {"error": "Opgeslagen scores konden niet worden gelezen."})
                         return
                     try:
+                        revision = _read_report_score_revision(report_path)
                         defaults = _read_report_score_defaults(report_path)
                     except (OSError, UnicodeDecodeError):
                         self._send_json(500, {"error": "Rapportscores konden niet worden gelezen."})
                         return
+                if saved_scores.get("revision") != revision:
+                    scores = []
                 completion_scores = scores if len(scores) == len(defaults) else defaults
                 complete = bool(completion_scores) and all(
                     isinstance(score, str) and score.strip() != ""
@@ -340,6 +358,15 @@ def make_report_server(
                 self._send_json(400, {"error": "Ongeldige JSON-scoregegevens."})
                 return
             scores = payload.get("scores") if isinstance(payload, dict) else None
+            revision = payload.get("revision") if isinstance(payload, dict) else None
+            try:
+                report_revision = _read_report_score_revision(report_path)
+            except (OSError, UnicodeDecodeError):
+                self._send_json(500, {"error": "Rapportscores konden niet worden gelezen."})
+                return
+            if revision != report_revision:
+                self._send_json(409, {"error": "Het rapport is gewijzigd; laad het opnieuw."})
+                return
             maxima = _read_report_maxima(report_path)
             if (
                 not isinstance(scores, list)
@@ -368,7 +395,10 @@ def make_report_server(
                     score_path.parent.mkdir(parents=True, exist_ok=True)
                     temporary = score_path.with_suffix(".tmp")
                     temporary.write_text(
-                        json.dumps({"scores": scores}, ensure_ascii=False),
+                        json.dumps(
+                            {"scores": scores, "revision": revision},
+                            ensure_ascii=False,
+                        ),
                         encoding="utf-8",
                     )
                     temporary.replace(score_path)

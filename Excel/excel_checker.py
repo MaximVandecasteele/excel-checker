@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import ast
+import hashlib
 import html
+import json
 import re
 import xml.etree.ElementTree as ET
 from collections import Counter
@@ -701,6 +704,7 @@ def _coalesce_cell_differences(
     sheet: str,
     changes: dict[tuple[int, int], tuple[Any, Any]],
     minimum_group_size: int = 20,
+    category: str = "Invoer data (inhoud)",
 ) -> list[Difference]:
     differences = []
     remaining = set(changes)
@@ -727,7 +731,7 @@ def _coalesce_cell_differences(
                 _add_difference(
                     differences, sheet, f"{coordinate} inhoud/formule",
                     expected, actual,
-                    "Invoer data (inhoud)",
+                    category,
                 )
             continue
 
@@ -756,6 +760,7 @@ def _coalesce_cell_differences(
             f"({len(component)} afwijkende cellen)",
             "Voorbeelden: " + "; ".join(expected_samples),
             "Voorbeelden: " + "; ".join(actual_samples),
+            category,
         ))
     return differences
 
@@ -1955,6 +1960,7 @@ def compare_workbooks(reference_path: Path, student_path: Path) -> ComparisonRes
         formula_changes: dict[
             tuple[int, int], tuple[str, str, tuple[str, str]]
         ] = {}
+        formula_value_changes: dict[tuple[int, int], tuple[Any, Any]] = {}
         cell_value_changes: dict[tuple[int, int], tuple[Any, Any]] = {}
         style_changes: dict[tuple[int, int], dict[str, tuple[Any, Any]]] = {}
         sort_conditions = _sort_conditions(expected)
@@ -2004,6 +2010,10 @@ def compare_workbooks(reference_path: Path, student_path: Path) -> ComparisonRes
                         right.value,
                         _formula_difference_key(left.value, right.value, coordinate),
                     )
+                elif left.data_type == "f" or right.data_type == "f":
+                    formula_value_changes[(row, column)] = (
+                        _cell_value(left), _cell_value(right)
+                    )
                 else:
                     cell_value_changes[(row, column)] = (
                         _cell_value(left), _cell_value(right)
@@ -2025,6 +2035,11 @@ def compare_workbooks(reference_path: Path, student_path: Path) -> ComparisonRes
                         expected_style, right_style[category]
                     )
         differences.extend(_coalesce_formula_differences(name, formula_changes))
+        differences.extend(
+            _coalesce_cell_differences(
+                name, formula_value_changes, category="Functies / berekeningen"
+            )
+        )
         differences.extend(_coalesce_cell_differences(name, cell_value_changes))
         differences.extend(_coalesce_style_differences(name, style_changes))
 
@@ -2194,6 +2209,14 @@ def write_report(
         for sheet, parts in (scoring_parts or {}).items()
         if parts
     }
+    scoring_sheet_names: dict[str, str] = {}
+    for difference in result.differences:
+        if difference.item == "Naam werkblad":
+            reference_sheet = ast.literal_eval(difference.expected)
+            if not isinstance(reference_sheet, str):
+                raise ValueError("De modelnaam van het werkblad is ongeldig.")
+            scoring_sheet_names[difference.sheet] = reference_sheet
+
     score_ids = {
         (sheet, part): index
         for index, (sheet, part) in enumerate(
@@ -2202,6 +2225,27 @@ def write_report(
             for part in parts
         )
     }
+    score_revision = hashlib.sha256(
+        json.dumps(
+            {
+                "error": result.error,
+                "differences": [
+                    (
+                        difference.sheet,
+                        difference.item,
+                        difference.expected,
+                        difference.actual,
+                        difference.category,
+                    )
+                    for difference in result.differences
+                ],
+                "scoring_parts": scoring_parts,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
 
     def score_field(
         sheet: str,
@@ -2226,7 +2270,9 @@ def write_report(
 
     visible_differences = [
         difference for difference in result.differences
-        if _report_scoring_part(difference) in scoring_parts.get(difference.sheet, {})
+        if _report_scoring_part(difference) in scoring_parts.get(
+            scoring_sheet_names.get(difference.sheet, difference.sheet), {}
+        )
     ]
 
     if result.error:
@@ -2244,7 +2290,10 @@ def write_report(
         sheets: dict[str, dict[str, list[Difference]]] = {}
         for difference in visible_differences:
             category = _report_category(difference)
-            sheets.setdefault(difference.sheet, {}).setdefault(category, []).append(
+            scoring_sheet = scoring_sheet_names.get(
+                difference.sheet, difference.sheet
+            )
+            sheets.setdefault(scoring_sheet, {}).setdefault(category, []).append(
                 difference
             )
 
@@ -2320,7 +2369,8 @@ def write_report(
         report_name = html.escape(output_path.name, quote=True)
         grading_start = (
             f'<main class="grading" data-score-key="{score_key}" '
-            f'data-score-file="{report_name}">'
+            f'data-score-file="{report_name}" '
+            f'data-score-revision="{score_revision}">'
         )
         grading_summary = (
             '<section class="score-summary">'
@@ -2360,7 +2410,9 @@ th{{background:#f1f3f4}}code{{white-space:pre-wrap;overflow-wrap:anywhere}}
   const grading = document.querySelector(".grading");
   if (!grading) return;
 
-  const storageKey = "excel-checker-score:" + grading.dataset.scoreKey;
+  const scoreRevision = grading.dataset.scoreRevision;
+  const storageKey =
+    "excel-checker-score:" + grading.dataset.scoreKey + ":" + scoreRevision;
   const fields = [...grading.querySelectorAll('input[data-score-field="earned"]')];
   const total = grading.querySelector(".score-total");
   const status = grading.querySelector(".score-status");
@@ -2431,7 +2483,10 @@ th{{background:#f1f3f4}}code{{white-space:pre-wrap;overflow-wrap:anywhere}}
         {{
           method: "POST",
           headers: {{ "Content-Type": "application/json" }},
-          body: JSON.stringify({{ scores: fields.map((field) => field.value) }})
+          body: JSON.stringify({{
+            scores: fields.map((field) => field.value),
+            revision: scoreRevision
+          }})
         }}
       );
       if (!response.ok) {{

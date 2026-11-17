@@ -1489,6 +1489,9 @@ class WorkbookComparisonTests(unittest.TestCase):
             report_path,
             {"Data": {"Invoer data (inhoud)": 3}},
         )
+        report_revision = report_path.read_text(encoding="utf-8").split(
+            'data-score-revision="', 1
+        )[1].split('"', 1)[0]
         (self.directory / "z_rapport.html").write_text(
             "<!doctype html><html><h1>Tweede rapport</h1></html>",
             encoding="utf-8",
@@ -1525,7 +1528,10 @@ class WorkbookComparisonTests(unittest.TestCase):
 
             request = Request(
                 f"{base_url}/api/scores/{report_path.name}",
-                data=json.dumps({"scores": ["2.5"]}).encode("utf-8"),
+                data=json.dumps({
+                    "scores": ["2.5"],
+                    "revision": report_revision,
+                }).encode("utf-8"),
                 headers={"Content-Type": "application/json"},
                 method="POST",
             )
@@ -1543,12 +1549,15 @@ class WorkbookComparisonTests(unittest.TestCase):
             saved_path = self.directory / ".excel_checker_scores" / f"{report_path.name}.json"
             self.assertEqual(
                 json.loads(saved_path.read_text(encoding="utf-8")),
-                {"scores": ["2.5"]},
+                {"scores": ["2.5"], "revision": report_revision},
             )
 
             invalid_request = Request(
                 f"{base_url}/api/scores/{report_path.name}",
-                data=json.dumps({"scores": ["3.5"]}).encode("utf-8"),
+                data=json.dumps({
+                    "scores": ["3.5"],
+                    "revision": report_revision,
+                }).encode("utf-8"),
                 headers={"Content-Type": "application/json"},
                 method="POST",
             )
