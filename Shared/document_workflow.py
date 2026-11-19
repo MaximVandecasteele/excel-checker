@@ -29,13 +29,13 @@ def review_folder(
         raise ValueError("file_extension must be a file extension starting with a dot.")
 
     output_folder.mkdir(parents=True, exist_ok=True)
-    filename_suffix = filename_suffix.casefold()
+    filename_suffix = re.sub(r"\s+", "", filename_suffix).casefold()
     reference_resolved = reference_path.resolve()
     student_files = sorted(
         path for path in input_folder.rglob("*")
         if path.is_file()
         and path.suffix.casefold() == normalized_extension
-        and path.stem.casefold().endswith(filename_suffix)
+        and re.sub(r"\s+", "", path.stem).casefold().endswith(filename_suffix)
         and not path.name.startswith("~$")
         and path.resolve() != reference_resolved
     )

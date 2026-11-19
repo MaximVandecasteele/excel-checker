@@ -73,6 +73,32 @@ class DocumentWorkflowTests(unittest.TestCase):
                 "task_FINAL_rapport.html",
             ])
 
+    def test_review_folder_ignores_whitespace_in_suffix_and_file_stem(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_folder = root / "students"
+            input_folder.mkdir()
+            reference = root / "model.docx"
+            reference.touch()
+            for name in ("Test_Word1.docx", "Test_Word 1.docx", "Test_WORD1  .docx"):
+                (input_folder / name).touch()
+            (input_folder / "Test_Word2.docx").touch()
+
+            reports = review_folder(
+                reference,
+                input_folder,
+                root / "reports",
+                file_extension=".docx",
+                compare=lambda _reference, student: student.name,
+                write_report=lambda result, destination: destination.write_text(result),
+                filename_suffix="Word1  ",
+            )
+
+            self.assertEqual(
+                [path.stem for path in reports],
+                ["Test_Word_1_rapport", "Test_WORD1_rapport", "Test_Word1_rapport"],
+            )
+
     def test_review_folder_requires_a_dot_prefixed_extension(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

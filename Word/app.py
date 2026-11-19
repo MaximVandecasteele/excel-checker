@@ -10,7 +10,11 @@ from tkinter import filedialog, messagebox, ttk
 
 from Shared.pdf_exporter import convert_html_reports, find_html_reports
 from Shared.report_server import make_report_server
-from Word.word_checker import GLOBAL_SCORING_PARTS, check_folder, reference_style_names
+from Word.word_checker import (
+    check_folder,
+    reference_style_names,
+    scoring_part_names,
+)
 
 
 class WordCheckerApp:
@@ -125,7 +129,7 @@ class WordCheckerApp:
         previous = {name: variable.get() for name, variable in self.scoring_vars.items()}
         for child in self.scoring_rows.winfo_children():
             child.destroy()
-        names = [*(f"Stijl: {name}" for name in styles), *GLOBAL_SCORING_PARTS]
+        names = scoring_part_names(styles)
         self.scoring_vars = {
             name: tk.StringVar(master=self.root, value=previous.get(name, ""))
             for name in names

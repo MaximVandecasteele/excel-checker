@@ -18,10 +18,58 @@ from Shared.document_workflow import review_folder
 
 
 GLOBAL_SCORING_PARTS = (
+    "Document opschonen",
+    "Stijlen op juiste alinea's",
     "Automatische nummering",
     "Inhoudsopgave",
     "Pagina-eindes",
 )
+
+_DUTCH_BUILTIN_STYLE_NAMES = {
+    "Normal": "Standaard",
+    "BodyText": "Hoofdtekst",
+    "BodyText2": "Hoofdtekst 2",
+    "BodyText3": "Hoofdtekst 3",
+    "Title": "Titel",
+    "Subtitle": "Ondertitel",
+    "Heading1": "Kop 1",
+    "Heading2": "Kop 2",
+    "Heading3": "Kop 3",
+    "Heading4": "Kop 4",
+    "Heading5": "Kop 5",
+    "Heading6": "Kop 6",
+    "Heading7": "Kop 7",
+    "Heading8": "Kop 8",
+    "Heading9": "Kop 9",
+    "Caption": "Bijschrift",
+    "Quote": "Citaat",
+    "IntenseQuote": "Intens citaat",
+    "ListParagraph": "Lijstalinea",
+    "NoSpacing": "Geen afstand",
+    "Header": "Koptekst",
+    "Footer": "Voettekst",
+    "FootnoteText": "Voetnoottekst",
+    "EndnoteText": "Eindnoottekst",
+    "FootnoteReference": "Voetnootverwijzing",
+    "EndnoteReference": "Eindnootverwijzing",
+    "TOCHeading": "Inhoudsopgavekop",
+    "TOC1": "Inhoudsopgave 1",
+    "TOC2": "Inhoudsopgave 2",
+    "TOC3": "Inhoudsopgave 3",
+    "TOC4": "Inhoudsopgave 4",
+    "TOC5": "Inhoudsopgave 5",
+    "TOC6": "Inhoudsopgave 6",
+    "TOC7": "Inhoudsopgave 7",
+    "TOC8": "Inhoudsopgave 8",
+    "TOC9": "Inhoudsopgave 9",
+    "Hyperlink": "Hyperlink",
+    "FollowedHyperlink": "Gevolgde hyperlink",
+    "DefaultParagraphFont": "Standaardlettertype",
+}
+_DUTCH_BUILTIN_STYLE_NAMES_NORMALIZED = {
+    re.sub(r"[\s_-]+", "", name).casefold(): dutch_name
+    for name, dutch_name in _DUTCH_BUILTIN_STYLE_NAMES.items()
+}
 
 
 @dataclass(frozen=True)
@@ -51,12 +99,91 @@ def _document_paragraphs(document: Any) -> list[Paragraph]:
 
 
 def _style_name(style: Any) -> str:
-    return style.name if style is not None else "Geen stijl"
+    if style is None:
+        return "Geen stijl"
+    for name in (style.style_id, style.name):
+        dutch_name = _DUTCH_BUILTIN_STYLE_NAMES.get(name)
+        if dutch_name is None:
+            normalized = re.sub(r"[\s_-]+", "", name).casefold()
+            dutch_name = _DUTCH_BUILTIN_STYLE_NAMES_NORMALIZED.get(normalized)
+        if dutch_name is not None:
+            return dutch_name
+    return style.name
 
 
-def _used_style_names(document: Any) -> list[str]:
+def _toc_paragraph_indexes(document: Any, paragraphs: list[Paragraph]) -> set[int]:
+    indexes: set[int] = set()
+    field_stack: list[dict[str, Any]] = []
+    paragraph_indexes = {id(paragraph._p): index for index, paragraph in enumerate(paragraphs)}
+
+    for paragraph in paragraphs:
+        index = paragraph_indexes[id(paragraph._p)]
+        if re.fullmatch(r"TOC\d+", paragraph.style.style_id, flags=re.IGNORECASE):
+            indexes.add(index)
+        if any(field["is_toc"] and field["separated"] for field in field_stack):
+            indexes.add(index)
+
+        for element in paragraph._p.iter():
+            if element.tag == qn("w:fldChar"):
+                field_type = element.get(qn("w:fldCharType"))
+                if field_type == "begin":
+                    field_stack.append({"instruction": "", "is_toc": False, "separated": False})
+                elif field_type == "separate" and field_stack:
+                    field = field_stack[-1]
+                    field["is_toc"] = bool(
+                        re.search(r"\bTOC\b", field["instruction"], flags=re.IGNORECASE)
+                    )
+                    field["separated"] = True
+                    if field["is_toc"]:
+                        indexes.add(index)
+                elif field_type == "end" and field_stack:
+                    field = field_stack.pop()
+                    if field["is_toc"] and field["separated"]:
+                        indexes.add(index)
+            elif element.tag == qn("w:instrText") and field_stack:
+                field_stack[-1]["instruction"] += element.text or ""
+
+        simple_fields = paragraph._p.iter(qn("w:fldSimple"))
+        if any(
+            re.search(r"\bTOC\b", field.get(qn("w:instr")) or "", flags=re.IGNORECASE)
+            for field in simple_fields
+        ):
+            indexes.add(index)
+
+    return indexes
+
+
+def _table_of_contents_entries(
+    document: Any, paragraphs: list[Paragraph]
+) -> tuple[list[str], set[int]]:
+    indexes = _toc_paragraph_indexes(document, paragraphs)
+    entries = [
+        paragraphs[index].text
+        for index in sorted(indexes)
+        if paragraphs[index].text.strip()
+        and not re.fullmatch(r"TOCHeading", paragraphs[index].style.style_id, flags=re.IGNORECASE)
+    ]
+    return entries, indexes
+
+
+def _style_sort_key(name: str) -> tuple[int, int]:
+    priority = {
+        "Titel": 0,
+        "Ondertitel": 1,
+        **{f"Kop {level}": level + 1 for level in range(1, 10)},
+        "Standaard": 11,
+    }
+    return priority.get(name, 12), 0
+
+
+def _used_style_names(
+    document: Any, excluded_paragraphs: set[int] | None = None
+) -> list[str]:
     names: list[str] = []
-    for paragraph in _document_paragraphs(document):
+    excluded_paragraphs = excluded_paragraphs or set()
+    for index, paragraph in enumerate(_document_paragraphs(document)):
+        if index in excluded_paragraphs:
+            continue
         run_style_names = [
             _style_name(run.style)
             for run in paragraph.runs
@@ -65,12 +192,37 @@ def _used_style_names(document: Any) -> list[str]:
         for name in [_style_name(paragraph.style), *run_style_names]:
             if name not in names:
                 names.append(name)
-    return names or ["Normal"]
+    if not names and not excluded_paragraphs:
+        return ["Standaard"]
+    return sorted(names, key=_style_sort_key)
 
 
 def reference_style_names(path: Path) -> list[str]:
     document = Document(path)
-    return _used_style_names(document)
+    paragraphs = _document_paragraphs(document)
+    _, toc_paragraphs = _table_of_contents_entries(document, paragraphs)
+    return _used_style_names(document, toc_paragraphs)
+
+
+def scoring_part_names(style_names: list[str]) -> list[str]:
+    return [
+        GLOBAL_SCORING_PARTS[0],
+        GLOBAL_SCORING_PARTS[1],
+        *(f"Stijl: {name}" for name in style_names),
+        *GLOBAL_SCORING_PARTS[2:],
+    ]
+
+
+_STYLE_HINT_PATTERN = re.compile(r"\s*\(([12])\)\s*$")
+
+
+def _style_hint(text: str) -> str | None:
+    match = _STYLE_HINT_PATTERN.search(text)
+    return match.group(1) if match else None
+
+
+def _without_style_hint(text: str) -> str:
+    return _STYLE_HINT_PATTERN.sub("", text)
 
 
 def _numbering_signature(paragraph: Paragraph) -> tuple[Any, ...] | None:
@@ -178,9 +330,10 @@ def _style_signature(
 
 
 def _style_definitions(document: Any, names: list[str]) -> dict[str, tuple[Any, ...] | None]:
+    styles = {_style_name(style): style for style in document.styles}
     result: dict[str, tuple[Any, ...] | None] = {}
     for name in names:
-        style = next((item for item in document.styles if item.name == name), None)
+        style = styles.get(name)
         result[name] = _style_signature(style) if style is not None else None
     return result
 
@@ -258,19 +411,25 @@ def compare_documents(reference_path: Path, student_path: Path) -> ComparisonRes
 
     reference_paragraphs = _document_paragraphs(reference)
     student_paragraphs = _document_paragraphs(student)
-    reference_styles = _used_style_names(reference)
+    reference_toc_entries, reference_toc_paragraphs = _table_of_contents_entries(
+        reference, reference_paragraphs
+    )
+    student_toc_entries, student_toc_paragraphs = _table_of_contents_entries(
+        student, student_paragraphs
+    )
+    reference_styles = _used_style_names(reference, reference_toc_paragraphs)
     result.sections = {
+        GLOBAL_SCORING_PARTS[0]: [],
+        GLOBAL_SCORING_PARTS[1]: [],
         **{f"Stijl: {name}": [] for name in reference_styles},
-        **{name: [] for name in GLOBAL_SCORING_PARTS},
+        **{name: [] for name in GLOBAL_SCORING_PARTS[2:]},
     }
-    student_styles = _used_style_names(student)
+    student_styles = _used_style_names(student, student_toc_paragraphs)
     reference_definitions = _style_definitions(reference, reference_styles)
     student_definitions = _style_definitions(student, reference_styles)
 
     for style_name in reference_styles:
         section = f"Stijl: {style_name}"
-        if style_name not in student_styles:
-            _add(result, section, "Stijl gebruikt", "aanwezig", "ontbreekt")
         if reference_definitions[style_name] != student_definitions[style_name]:
             _add(
                 result, section, "Stijldefinitie",
@@ -285,39 +444,66 @@ def compare_documents(reference_path: Path, student_path: Path) -> ComparisonRes
                 "niet gebruikt in model", "gebruikt in leerlingbestand",
             )
 
-    for index in range(max(len(reference_paragraphs), len(student_paragraphs))):
-        expected = reference_paragraphs[index] if index < len(reference_paragraphs) else None
-        actual = student_paragraphs[index] if index < len(student_paragraphs) else None
+    reference_content = [
+        paragraph for index, paragraph in enumerate(reference_paragraphs)
+        if index not in reference_toc_paragraphs
+    ]
+    student_content = [
+        paragraph for index, paragraph in enumerate(student_paragraphs)
+        if index not in student_toc_paragraphs
+    ]
+    def without_empty_paragraphs(
+        paragraphs: list[Paragraph],
+    ) -> tuple[list[Paragraph], tuple[int, ...]]:
+        content: list[Paragraph] = []
+        empty_positions: list[int] = []
+        for paragraph in paragraphs:
+            if paragraph.text.strip():
+                content.append(paragraph)
+            else:
+                empty_positions.append(len(content))
+        return content, tuple(empty_positions)
+
+    reference_content, reference_empty_positions = without_empty_paragraphs(reference_content)
+    student_content, student_empty_positions = without_empty_paragraphs(student_content)
+    if reference_empty_positions != student_empty_positions:
+        _add(
+            result, "Document opschonen", "Lege alinea's",
+            reference_empty_positions or "geen",
+            student_empty_positions or "geen",
+        )
+
+    for index in range(max(len(reference_content), len(student_content))):
+        expected = reference_content[index] if index < len(reference_content) else None
+        actual = student_content[index] if index < len(student_content) else None
         section = f"Stijl: {_style_name(expected.style) if expected is not None else '[extra alinea]'}"
         location = f"Alinea {index + 1}"
         if expected is None or actual is None:
-            paragraph = expected if expected is not None else actual
-            section = f"Stijl: {_style_name(paragraph.style)}"
-            is_empty = paragraph is not None and not paragraph.text.strip()
-            item = (
-                f"{location} — lege alinea ontbreekt of is extra"
-                if is_empty
-                else f"{location} ontbreekt of is extra"
-            )
             _add(
-                result, section, item,
-                (
-                    "lege alinea ontbreekt" if expected is not None and is_empty
-                    else expected.text if expected is not None else "geen alinea"
-                ),
-                (
-                    "lege alinea toegevoegd" if actual is not None and is_empty
-                    else actual.text if actual is not None else "geen alinea"
-                ),
+                result, section, f"{location} ontbreekt of is extra",
+                expected.text if expected is not None else "geen alinea",
+                actual.text if actual is not None else "geen alinea",
             )
             continue
-        if expected.text != actual.text:
+        expected_hint = _style_hint(expected.text)
+        actual_hint = _style_hint(actual.text)
+        if actual_hint is not None:
+            _add(
+                result, "Document opschonen", f"{location} — stijlaanwijzing verwijderd",
+                f"({expected_hint})" if expected_hint is not None else "geen aanduiding",
+                f"stijlaanwijzing ({actual_hint}) is niet verwijderd",
+            )
+        expected_text = _without_style_hint(expected.text)
+        actual_text = _without_style_hint(actual.text)
+        expected_normalized = re.sub(r" {2,}", " ", expected_text)
+        actual_normalized = re.sub(r" {2,}", " ", actual_text)
+        if expected_normalized != actual_normalized:
             _add(result, section, f"{location} — tekenverschil", expected.text, actual.text)
         expected_style = _style_name(expected.style)
         actual_style = _style_name(actual.style)
         if expected_style != actual_style:
             _add(
-                result, f"Stijl: {expected_style}",
+                result, "Stijlen op juiste alinea's",
                 f"{location} — toegepaste stijl", expected_style, actual_style,
             )
 
@@ -338,21 +524,17 @@ def compare_documents(reference_path: Path, student_path: Path) -> ComparisonRes
         )
         if expected_double_spaces != actual_double_spaces:
             _add(
-                result, section, f"{location} — dubbele spaties",
+                result, "Document opschonen", f"{location} — dubbele spaties",
                 expected_double_spaces, actual_double_spaces,
-            )
-        if (not expected.text.strip()) != (not actual.text.strip()):
-            _add(
-                result, section, f"{location} — lege alinea",
-                "leeg" if not expected.text.strip() else "niet leeg",
-                "leeg" if not actual.text.strip() else "niet leeg",
             )
 
     reference_toc = _has_generated_toc(reference)
     student_toc = _has_generated_toc(student)
     result.summaries["Inhoudsopgave"] = (
         f"Model: {'aanwezig' if reference_toc else 'afwezig'}; "
-        f"leerling: {'aanwezig' if student_toc else 'afwezig'}."
+        f"leerling: {'aanwezig' if student_toc else 'afwezig'}; "
+        f"{len(reference_toc_entries)} vermelding(en) in het model en "
+        f"{len(student_toc_entries)} in het leerlingbestand."
     )
     if reference_toc != student_toc:
         _add(
@@ -360,6 +542,56 @@ def compare_documents(reference_path: Path, student_path: Path) -> ComparisonRes
             "aanwezig" if reference_toc else "afwezig",
             "aanwezig" if student_toc else "afwezig",
         )
+    toc_matcher = difflib.SequenceMatcher(
+        a=reference_toc_entries, b=student_toc_entries, autojunk=False
+    )
+    for operation, start_reference, end_reference, start_student, end_student in (
+        toc_matcher.get_opcodes()
+    ):
+        if operation == "equal":
+            continue
+        expected_entries = reference_toc_entries[start_reference:end_reference]
+        actual_entries = student_toc_entries[start_student:end_student]
+        if operation == "delete":
+            for entry in expected_entries:
+                _add(
+                    result, "Inhoudsopgave", "Titel ontbreekt",
+                    entry, "ontbreekt in inhoudsopgave",
+                )
+        elif operation == "insert":
+            for entry in actual_entries:
+                _add(
+                    result, "Inhoudsopgave", "Extra titel",
+                    "niet aanwezig in model", entry,
+                )
+        else:
+            for entry_index in range(max(len(expected_entries), len(actual_entries))):
+                expected_entry = (
+                    expected_entries[entry_index]
+                    if entry_index < len(expected_entries) else "ontbreekt"
+                )
+                actual_entry = (
+                    actual_entries[entry_index]
+                    if entry_index < len(actual_entries) else "ontbreekt"
+                )
+                if (
+                    expected_entry != "ontbreekt"
+                    and actual_entry != "ontbreekt"
+                    and expected_entry.split("\t", 1)[0] != actual_entry.split("\t", 1)[0]
+                ):
+                    _add(
+                        result, "Inhoudsopgave", "Titel ontbreekt",
+                        expected_entry, "ontbreekt in inhoudsopgave",
+                    )
+                    _add(
+                        result, "Inhoudsopgave", "Extra titel",
+                        "niet aanwezig in model", actual_entry,
+                    )
+                else:
+                    _add(
+                        result, "Inhoudsopgave", "Titel of paginanummer wijkt af",
+                        expected_entry, actual_entry,
+                    )
 
     reference_breaks = _page_breaks(reference_paragraphs)
     student_breaks = _page_breaks(student_paragraphs)
@@ -381,10 +613,12 @@ def compare_documents(reference_path: Path, student_path: Path) -> ComparisonRes
             reference_section_breaks, student_section_breaks,
         )
     reference_numbering = [
-        _numbering_signature(paragraph) for paragraph in reference_paragraphs
+        _numbering_signature(paragraph) for index, paragraph in enumerate(reference_paragraphs)
+        if index not in reference_toc_paragraphs
     ]
     student_numbering = [
-        _numbering_signature(paragraph) for paragraph in student_paragraphs
+        _numbering_signature(paragraph) for index, paragraph in enumerate(student_paragraphs)
+        if index not in student_toc_paragraphs
     ]
     result.summaries["Automatische nummering"] = (
         f"Genummerde alinea's: model "
