@@ -1,1 +1,1 @@
-"""Word-specific application code will live here."""
+"""Word document comparison app."""

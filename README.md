@@ -1,10 +1,10 @@
-# Excel Checker
+# Excel and Word Checker
 
 Een lokale desktopapp voor het vergelijken van een modeloplossing met `.xlsx`-bestanden van leerlingen. De app maakt voor elk leerlingbestand een afzonderlijk HTML-rapport dat je in een browser kunt openen.
 
 ## Opbouw
 
-De map `Excel/` bevat de Excel-app, de werkmapvergelijker, de Excel-specifieke tests en de Excel-afhankelijkheid `openpyxl`. `Word/` is gereserveerd voor een latere zelfstandige Word-app. De map `shared/` bevat de herbruikbare documentworkflow, rapportviewer en PDF-export. De workflow krijgt een documentvergelijker en rapportgenerator als functies mee, zodat beide apps dezelfde algemene verwerking kunnen gebruiken met eigen documenttype-specifieke code.
+De mappen `Excel/` en `Word/` bevatten zelfstandige apps en documentvergelijkers. `Shared/` bevat de herbruikbare documentworkflow, rapportviewer en PDF-export. De documentworkflow krijgt een documentvergelijker en rapportgenerator als functies mee, zodat beide apps dezelfde algemene verwerking kunnen gebruiken met eigen documenttype-specifieke code.
 
 ## Starten
 
@@ -14,6 +14,15 @@ Vereist Python 3.10 of hoger.
 python3 -m pip install -r Excel/requirements.txt
 python3 -m Excel.app
 ```
+
+Voor Word:
+
+```bash
+python3 -m pip install -r Word/requirements.txt
+python3 -m Word.app
+```
+
+In de Word-app kies je de modeloplossing, een map met leerlingbestanden en de rapportmap. De app verwerkt `.docx`-bestanden in de map en submappen. Stel desgewenst een bestandsnaameinde in (zonder `.docx`) en puntenmaxima per gebruikte stijl en voor automatische nummering, inhoudsopgave en pagina-eindes. Een onderdeel zonder verschillen krijgt automatisch alle ingestelde punten. Het rapport toont iedere gebruikte modelstijl afzonderlijk en markeert gewijzigde tekens; de ingevoerde tekstwaarden zijn ook uitklapbaar.
 
 Kies in de app de modeloplossing, de hoofdmap met leerlingbestanden en de map voor de rapporten. Vul eventueel de gewenste tekenreeks in waarop de bestandsnaam moet eindigen, zonder `.xlsx`; die extensie wordt verondersteld. Alleen `.xlsx`-bestanden die aan dit einde voldoen worden verwerkt. Laat het veld leeg om alle `.xlsx`-bestanden in de gekozen map en onderliggende mappen te verwerken. Excel-tijdelijke bestanden worden overgeslagen. De rapportbestandsnamen bevatten de mapstructuur zodat bestanden met dezelfde naam herkenbaar blijven.
 
@@ -32,7 +41,7 @@ Playwright gebruikt Chromium om rapporten lokaal te renderen; er is geen interne
 ## Tests uitvoeren
 
 ```bash
-python3 -m pip install -r Excel/requirements.txt
+python3 -m pip install -r Excel/requirements.txt -r Word/requirements.txt
 python3 -m unittest -v
 ```
 
@@ -45,3 +54,5 @@ De eerste versie vergelijkt celwaarden en formules, celopmaak, werkbladnamen en 
 De vergelijking van celinhoud en opmaak is exact, zonder automatische beoordeling van gelijkwaardige formules. Rijhoogtes en kolombreedtes worden alleen als afwijkend gemeld wanneer ze meer dan 20% afwijken van het model. Rijen of kolommen met dezelfde afmeting in het model moeten onderling ook dezelfde afmeting hebben in het leerlingbestand. Overige rij- en kolominstellingen worden exact vergeleken. Autofilters worden op bereik en criteria gecontroleerd en als één leesbare melding weergegeven. Als het model een sorteerinstelling bevat, wordt de data die aan de model-filtercriteria voldoet op de verwachte sorteervolgorde gecontroleerd; een foutieve sortering geeft één melding. Wanneer de records verder identiek zijn maar anders gerangschikt, worden de daardoor ontstane celverschillen niet afzonderlijk getoond. Kolombreedtes die Excel als één bereik opslaat, worden per kolom vergeleken en verschillen worden per betrokken kolom gerapporteerd. Onbelangrijke Excel-verschillen in de schrijfwijze van getalnotaties (zoals een al dan niet ge-escapete spatie) worden genormaliseerd; inhoudelijk verschillende notaties blijven zichtbaar. Excel-functies die `openpyxl` niet volledig kan inlezen of bewaren, zoals sommige slicers, externe koppelingen of ingesloten objecten, vallen buiten deze eerste versie. Gebruik de app daarom op kopieën als bestanden zulke functies bevatten.
 
 Leerlingbestanden (`.xlsx`/`.xlsm`), PDF's en rapportmappen zijn standaard uitgesloten van Git via `.gitignore`, zodat leerlinggegevens niet per ongeluk worden gepubliceerd. Dit project heeft momenteel nog geen open-sourcelicentie.
+
+De Word-vergelijker controleert alinea-tekst exact (inclusief spaties), lege alinea's, gebruikte stijlen en hun definities, automatische nummering, een gegenereerde inhoudsopgave en pagina-/sectie-eindes. Tekstvergelijkingen markeren verwijderde en toegevoegde tekens. Alleen `.docx`-bestanden worden ondersteund; wijzigingen aan Word-functies die niet zijn opgenomen in deze controles, zoals afbeeldingen, tabellenopmaak en documentmetadata, worden niet beoordeeld.

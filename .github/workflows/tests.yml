@@ -20,6 +20,6 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install dependencies
-        run: python -m pip install -r Excel/requirements.txt
+        run: python -m pip install -r Excel/requirements.txt -r Word/requirements.txt
       - name: Run tests
         run: python -m unittest -v
