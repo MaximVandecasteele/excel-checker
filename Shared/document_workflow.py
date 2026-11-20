@@ -21,21 +21,28 @@ def review_folder(
     compare: Callable[[Path, Path], Result],
     write_report: Callable[[Result, Path], None],
     filename_suffix: str = "",
+    filename_match: str = "suffix",
     report_suffix: str = "_rapport.html",
 ) -> list[Path]:
     """Run a document-specific comparison and report writer over a folder tree."""
     normalized_extension = file_extension.casefold()
     if not normalized_extension.startswith(".") or normalized_extension == ".":
         raise ValueError("file_extension must be a file extension starting with a dot.")
+    if filename_match not in {"suffix", "contains"}:
+        raise ValueError("filename_match must be 'suffix' or 'contains'.")
 
     output_folder.mkdir(parents=True, exist_ok=True)
-    filename_suffix = re.sub(r"\s+", "", filename_suffix).casefold()
+    filename_filter = re.sub(r"\s+", "", filename_suffix).casefold()
     reference_resolved = reference_path.resolve()
     student_files = sorted(
         path for path in input_folder.rglob("*")
         if path.is_file()
         and path.suffix.casefold() == normalized_extension
-        and re.sub(r"\s+", "", path.stem).casefold().endswith(filename_suffix)
+        and (
+            filename_filter in re.sub(r"\s+", "", path.stem).casefold()
+            if filename_match == "contains"
+            else re.sub(r"\s+", "", path.stem).casefold().endswith(filename_filter)
+        )
         and not path.name.startswith("~$")
         and path.resolve() != reference_resolved
     )

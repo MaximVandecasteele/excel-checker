@@ -950,4 +950,5 @@ def check_folder(
             result, destination, scoring_parts
         ),
         filename_suffix=filename_suffix,
+        filename_match="contains",
     )

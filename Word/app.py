@@ -45,7 +45,7 @@ class WordCheckerApp:
 
         suffix_row = ttk.Frame(frame)
         suffix_row.pack(fill="x", pady=6)
-        ttk.Label(suffix_row, text="Bestandsnaam eindigt op", width=25).pack(side="left", anchor="w")
+        ttk.Label(suffix_row, text="Bestandsnaam bevat", width=25).pack(side="left", anchor="w")
         ttk.Entry(suffix_row, textvariable=self.filename_suffix).pack(
             side="left", fill="x", expand=True, padx=8,
         )
@@ -228,10 +228,10 @@ class WordCheckerApp:
         students: Path,
         output: Path,
         scoring: dict[str, float],
-        suffix: str,
+        filename_filter: str,
     ) -> None:
         try:
-            reports = check_folder(reference, students, output, scoring, suffix)
+            reports = check_folder(reference, students, output, scoring, filename_filter)
             self.messages.put(("done", (reports, output)))
         except Exception as exc:
             self.messages.put(("error", str(exc)))

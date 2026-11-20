@@ -99,6 +99,41 @@ class DocumentWorkflowTests(unittest.TestCase):
                 ["Test_Word_1_rapport", "Test_WORD1_rapport", "Test_Word1_rapport"],
             )
 
+    def test_review_folder_can_match_text_anywhere_in_name_ignoring_case_and_spaces(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_folder = root / "students"
+            input_folder.mkdir()
+            reference = root / "model.docx"
+            reference.touch()
+            for name in (
+                "Test_Word1_Final.docx",
+                "Test_Word 1_Final.docx",
+                "Test_WORD1_Final.docx",
+                "Test_Word2_Final.docx",
+            ):
+                (input_folder / name).touch()
+
+            reports = review_folder(
+                reference,
+                input_folder,
+                root / "reports",
+                file_extension=".docx",
+                compare=lambda _reference, student: student.name,
+                write_report=lambda result, destination: destination.write_text(result),
+                filename_suffix="word 1",
+                filename_match="contains",
+            )
+
+            self.assertEqual(
+                [path.stem for path in reports],
+                [
+                    "Test_WORD1_Final_rapport",
+                    "Test_Word1_Final_rapport",
+                    "Test_Word_1_Final_rapport",
+                ],
+            )
+
     def test_review_folder_requires_a_dot_prefixed_extension(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
