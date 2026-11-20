@@ -50,6 +50,12 @@ class WordCheckerApp:
             side="left", fill="x", expand=True, padx=8,
         )
         ttk.Label(suffix_row, text="(.docx wordt toegevoegd)").pack(side="right")
+        ttk.Label(
+            frame,
+            text="Spaties en hoofdletters worden genegeerd. Laat leeg om alle .docx-bestanden te verwerken.",
+            wraplength=760,
+            foreground="#555",
+        ).pack(anchor="w", pady=(0, 4))
         self._file_row(frame, "Map voor rapporten", self.output, self._choose_output)
 
         scoring_frame = ttk.LabelFrame(frame, text="Puntenverdeling (maximum per stijl/controle)")

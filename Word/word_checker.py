@@ -290,52 +290,159 @@ def _numbering_signature(paragraph: Paragraph) -> tuple[Any, ...] | None:
     )
 
 
-def _style_signature(
+def _format_length(value: Any, unit: str) -> str:
+    if value is None:
+        return "Niet ingesteld"
+    emus_per_unit = 360_000 if unit == "cm" else 12_700
+    amount = float(value) / emus_per_unit
+    return f"{amount:g} {unit}"
+
+
+def _setting_value(value: Any) -> str:
+    if value is None:
+        return "Niet ingesteld"
+    if isinstance(value, bool):
+        return "Aan" if value else "Uit"
+    return str(value)
+
+
+def _style_settings(
     style: Any, seen: frozenset[str] = frozenset()
-) -> tuple[Any, ...]:
+) -> dict[str, Any]:
     if style.style_id in seen:
-        return ("style inheritance cycle", style.style_id)
+        return {"Overervingslus": style.style_id}
     font = style.font
     color = font.color
-    font_properties = (
-        font.name, font.size.pt if font.size is not None else None, font.bold,
-        font.italic, font.underline, font.strike, font.all_caps, font.small_caps,
-        font.subscript, font.superscript,
-        str(color.rgb) if color is not None and color.rgb is not None else None,
-        str(color.theme_color) if color is not None and color.theme_color is not None else None,
-        getattr(color, "theme_brightness", None) if color is not None else None,
-    )
-    paragraph_properties: tuple[Any, ...] = ()
+    settings: dict[str, Any] = {
+        "Stijltype": {
+            WD_STYLE_TYPE.PARAGRAPH: "Alinea",
+            WD_STYLE_TYPE.CHARACTER: "Teken",
+            WD_STYLE_TYPE.TABLE: "Tabel",
+            WD_STYLE_TYPE.LIST: "Lijst",
+        }.get(style.type, str(style.type)),
+        "Lettertype": font.name,
+        "Grootte": f"{font.size.pt:g} pt" if font.size is not None else None,
+        "Vet": font.bold,
+        "Cursief": font.italic,
+        "Onderstrepen": font.underline,
+        "Doorhalen": font.strike,
+        "Hoofdletters": font.all_caps,
+        "Kleine hoofdletters": font.small_caps,
+        "Subscript": font.subscript,
+        "Superscript": font.superscript,
+        "Tekstkleur": (
+            (
+                f"RGB {color.rgb}" if color.rgb is not None
+                else f"Themakleur {color.theme_color}"
+                if color.theme_color is not None else "Automatisch"
+            )
+            + (
+                f", helderheid {color.theme_brightness:g}"
+                if getattr(color, "theme_brightness", None) is not None else ""
+            )
+            if color is not None else None
+        ),
+    }
     if style.type == WD_STYLE_TYPE.PARAGRAPH:
         paragraph = style.paragraph_format
-        tabs = tuple(
-            (str(tab.position), str(tab.alignment), str(tab.leader))
-            for tab in paragraph.tab_stops
-        )
-        paragraph_properties = (
-            str(paragraph.alignment) if paragraph.alignment is not None else None,
-            str(paragraph.left_indent), str(paragraph.right_indent),
-            str(paragraph.first_line_indent), str(paragraph.space_before),
-            str(paragraph.space_after), str(paragraph.line_spacing),
-            paragraph.keep_together, paragraph.keep_with_next,
-            paragraph.page_break_before, paragraph.widow_control, tabs,
-        )
+        alignment = paragraph.alignment
+        alignments = {
+            0: "Links uitlijnen",
+            1: "Centreren",
+            2: "Rechts uitlijnen",
+            3: "Uitvullen",
+            4: "Verdeeld",
+            5: "Uitvullen (medium)",
+            6: "Thais verdeeld",
+        }
+        special_indent = paragraph.first_line_indent
+        if special_indent is None:
+            special_indent_value = None
+        elif special_indent < 0:
+            special_indent_value = f"Verkeerd-om: {_format_length(-special_indent, 'cm')}"
+        else:
+            special_indent_value = f"Eerste regel: {_format_length(special_indent, 'cm')}"
+        line_spacing = paragraph.line_spacing
+        if line_spacing is not None and not isinstance(line_spacing, (int, float)):
+            line_spacing = _format_length(line_spacing, "pt")
+        elif isinstance(line_spacing, float):
+            line_spacing = f"Meerdere {line_spacing:g}"
+        tabs = []
+        tab_alignments = {
+            0: "Links",
+            1: "Gecentreerd",
+            2: "Rechts",
+            3: "Decimaal",
+            4: "Staand",
+        }
+        tab_leaders = {
+            0: "Geen",
+            1: "Punten",
+            2: "Streepjes",
+            3: "Lijn",
+            4: "Zware lijn",
+            5: "Middenpunt",
+        }
+        for tab in paragraph.tab_stops:
+            tabs.append(
+                f"{_format_length(tab.position, 'cm')} "
+                f"({tab_alignments.get(tab.alignment, 'Links')}, "
+                f"{tab_leaders.get(tab.leader, 'Geen')})"
+            )
+        settings.update({
+            "Uitlijning": alignments.get(alignment, "Niet ingesteld"),
+            "Inspringing links": _format_length(paragraph.left_indent, "cm"),
+            "Inspringing rechts": _format_length(paragraph.right_indent, "cm"),
+            "Speciaal": special_indent_value,
+            "Afstand vóór": _format_length(paragraph.space_before, "pt"),
+            "Afstand na": _format_length(paragraph.space_after, "pt"),
+            "Regelafstand": _setting_value(line_spacing),
+            "Regels bijeenhouden": paragraph.keep_together,
+            "Met volgende alinea bijeenhouden": paragraph.keep_with_next,
+            "Pagina-einde ervoor": paragraph.page_break_before,
+            "Zwevende regels voorkomen": paragraph.widow_control,
+            "Tabstops": ", ".join(tabs) if tabs else None,
+        })
     base_style = style.base_style
-    return (
-        str(style.type), _style_name(base_style),
-        _style_signature(base_style, seen | {style.style_id}) if base_style else None,
-        font_properties,
-        paragraph_properties,
-    )
+    settings["Gebaseerd op"] = _style_name(base_style) if base_style else "Geen"
+    if base_style is not None:
+        settings.update({
+            f"Overgenomen van {_style_name(base_style)} — {name}": value
+            for name, value in _style_settings(
+                base_style, seen | {style.style_id}
+            ).items()
+        })
+    return settings
 
 
-def _style_definitions(document: Any, names: list[str]) -> dict[str, tuple[Any, ...] | None]:
+def _style_definitions(
+    document: Any, names: list[str]
+) -> dict[str, dict[str, Any] | None]:
     styles = {_style_name(style): style for style in document.styles}
-    result: dict[str, tuple[Any, ...] | None] = {}
+    result: dict[str, dict[str, Any] | None] = {}
     for name in names:
         style = styles.get(name)
-        result[name] = _style_signature(style) if style is not None else None
+        result[name] = _style_settings(style) if style is not None else None
     return result
+
+
+def _display_style_value(value: Any) -> str:
+    if isinstance(value, bool) or value is None:
+        return _setting_value(value)
+    if isinstance(value, str):
+        return value
+    return str(value)
+
+
+def _highlight_double_spaces(text: str) -> str:
+    parts = []
+    previous = 0
+    for match in re.finditer(r" {2,}", text):
+        parts.append(html.escape(text[previous:match.start()]))
+        parts.append(f'<mark>{html.escape(match.group())}</mark>')
+        previous = match.end()
+    parts.append(html.escape(text[previous:]))
+    return "".join(parts) or '<span class="space">∅</span>'
 
 
 def _has_generated_toc(document: Any) -> bool:
@@ -430,12 +537,24 @@ def compare_documents(reference_path: Path, student_path: Path) -> ComparisonRes
 
     for style_name in reference_styles:
         section = f"Stijl: {style_name}"
-        if reference_definitions[style_name] != student_definitions[style_name]:
+        reference_definition = reference_definitions[style_name]
+        student_definition = student_definitions[style_name]
+        if reference_definition is None or student_definition is None:
             _add(
                 result, section, "Stijldefinitie",
-                reference_definitions[style_name] or "ontbreekt",
-                student_definitions[style_name] or "ontbreekt",
+                "ontbreekt" if reference_definition is None else "aanwezig",
+                "ontbreekt" if student_definition is None else "aanwezig",
             )
+        else:
+            for setting in dict.fromkeys([*reference_definition, *student_definition]):
+                expected = reference_definition.get(setting)
+                actual = student_definition.get(setting)
+                if expected != actual:
+                    _add(
+                        result, section, f"Stijldefinitie — {setting}",
+                        _display_style_value(expected),
+                        _display_style_value(actual),
+                    )
 
     for style_name in student_styles:
         if style_name not in reference_styles:
@@ -525,7 +644,7 @@ def compare_documents(reference_path: Path, student_path: Path) -> ComparisonRes
         if expected_double_spaces != actual_double_spaces:
             _add(
                 result, "Document opschonen", f"{location} — dubbele spaties",
-                expected_double_spaces, actual_double_spaces,
+                expected.text, actual.text,
             )
 
     reference_toc = _has_generated_toc(reference)
@@ -648,6 +767,34 @@ def _char_diff(expected: str, actual: str) -> str:
     return "".join(parts) or '<span class="space">∅</span>'
 
 
+def _finding_row(finding: Finding) -> str:
+    return (
+        "<tr><th>" + html.escape(finding.item) + "</th><td>"
+        + _char_diff(finding.expected, finding.actual)
+        + '<details><summary>Toon waarden</summary><p>Model: <code>'
+        + html.escape(finding.expected) + "</code></p><p>Leerling: <code>"
+        + html.escape(finding.actual) + "</code></p></details></td></tr>"
+    )
+
+
+def _double_spaces_row(findings: list[Finding]) -> str:
+    locations = []
+    for finding in findings:
+        location = finding.item.split(" — ", 1)[0]
+        locations.append(
+            "<li><strong>" + html.escape(location) + "</strong>"
+            "<p>Model: <code>" + _highlight_double_spaces(finding.expected) + "</code></p>"
+            "<p>Leerling: <code>" + _highlight_double_spaces(finding.actual) + "</code></p></li>"
+        )
+    count = len(findings)
+    plural = "alinea" if count == 1 else "alinea's"
+    return (
+        f'<tr><th>Dubbele spaties ({count} {plural})</th><td>'
+        f'<details><summary>Toon de plaatsen met dubbele spaties</summary>'
+        f"<ul>{''.join(locations)}</ul></details></td></tr>"
+    )
+
+
 def write_report(
     result: ComparisonResult,
     output_path: Path,
@@ -675,12 +822,12 @@ def write_report(
         ).encode("utf-8")
     ).hexdigest()
 
-    score_fields = []
+    score_fields: dict[str, str] = {}
     for index, (section, maximum) in enumerate(scored):
         automatic = result.error is None and not result.sections.get(section)
         value = f' value="{html.escape(str(maximum), quote=True)}"' if automatic else ""
         auto_attribute = ' data-auto-award="true"' if automatic else ""
-        score_fields.append(
+        score_fields[section] = (
             f'<span class="score"><label for="score-{index}">Behaald</label> '
             f'<input id="score-{index}" type="number" min="0" '
             f'max="{html.escape(str(maximum), quote=True)}" step="any" '
@@ -690,30 +837,41 @@ def write_report(
 
     if result.error:
         detail = f'<p class="error">{html.escape(result.error)}</p>'
+        detail += "".join(
+            f'<section><h2>{html.escape(section)} {score_fields.get(section, "")}</h2></section>'
+            for section, _maximum in scored
+        )
     else:
         sections = []
         section_names = list(dict.fromkeys([*scoring_parts, *result.sections]))
         for section in section_names:
             findings = result.sections.get(section, [])
+            score_field = score_fields.get(section, "")
+            heading = f"<h2>{html.escape(section)} {score_field}</h2>"
             if not findings:
                 sections.append(
-                    f'<section><h2>{html.escape(section)}</h2>'
+                    f"<section>{heading}"
                     '<p class="ok">Geen verschillen gevonden. '
                     f'{html.escape(result.summaries.get(section, ""))}</p></section>'
                 )
                 continue
-            lines = "".join(
-                "<tr><th>" + html.escape(finding.item) + "</th><td>"
-                + _char_diff(finding.expected, finding.actual)
-                + '<details><summary>Toon waarden</summary><p>Model: <code>'
-                + html.escape(finding.expected) + "</code></p><p>Leerling: <code>"
-                + html.escape(finding.actual) + "</code></p></details></td></tr>"
-                for finding in findings
-            )
+            duplicate_space_findings = [
+                finding for finding in findings
+                if finding.item.endswith(" — dubbele spaties")
+            ]
+            lines: list[str] = []
+            doubles_inserted = False
+            for finding in findings:
+                if finding.item.endswith(" — dubbele spaties"):
+                    if not doubles_inserted:
+                        lines.append(_double_spaces_row(duplicate_space_findings))
+                        doubles_inserted = True
+                    continue
+                lines.append(_finding_row(finding))
             sections.append(
-                f"<section><h2>{html.escape(section)}</h2><table>"
+                f"<section>{heading}<table>"
                 f"<thead><tr><th>Controle</th><th>Vergelijking (rood = model, groen = leerling)</th></tr></thead>"
-                f"<tbody>{lines}</tbody></table></section>"
+                f"<tbody>{''.join(lines)}</tbody></table></section>"
             )
         detail = "".join(sections)
         if result.matches:
@@ -724,30 +882,29 @@ def write_report(
 
     score_section = ""
     if scored:
-        score_rows = "".join(
-            f"<li>{html.escape(section)} {field}</li>"
-            for (section, _maximum), field in zip(scored, score_fields)
-        )
         score_section = (
             f'<main class="grading" data-score-revision="{revision}" '
             f'data-score-file="{html.escape(output_path.name, quote=True)}">'
-            f"<h2>Punten</h2><ul>{score_rows}</ul>"
-            '<p>Totaal: <output id="score-total">0</output> punten</p>'
-            '<p id="score-status" aria-live="polite"></p></main>'
+            '<p class="score-total">Totaal: <output id="score-total">0</output> punten</p>'
+            '<p id="score-status" aria-live="polite"></p>'
         )
+        detail += "</main>"
 
     document = f"""<!doctype html>
 <html lang="nl"><meta charset="utf-8"><meta name="viewport" content="width=device-width">
 <title>{html.escape(result.student_file.stem)} — Word Checker</title>
 <style>
 body{{font:16px/1.5 system-ui,sans-serif;max-width:1100px;margin:2rem auto;padding:0 1rem;color:#222}}
-h1,h2{{line-height:1.2}} section{{margin:2rem 0}} table{{border-collapse:collapse;width:100%}}
+h1,h2{{line-height:1.2}} h2{{display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap}}
+section{{margin:2rem 0}} table{{border-collapse:collapse;width:100%}}
 th,td{{border:1px solid #ccc;padding:.6rem;text-align:left;vertical-align:top;white-space:pre-wrap}}
 th{{background:#f2f4f7}} code{{white-space:pre-wrap;overflow-wrap:anywhere}}
 del{{background:#ffd9d9;color:#8b0000;text-decoration:line-through}}
 ins{{background:#d9f7df;color:#075b19;text-decoration:none}} .space{{color:#777}}
 .ok{{padding:1rem;background:#e6f4ea}} .error{{padding:1rem;background:#fce8e6}}
-.score input{{width:5rem}} details{{margin-top:.5rem}} main.grading{{border-top:2px solid #ddd}}
+.score{{font-size:.9rem;font-weight:400;white-space:nowrap}} .score input{{width:5rem}}
+details{{margin-top:.5rem}} main.grading{{border-top:2px solid #ddd}}
+main.grading>.score-total{{font-weight:700}} mark{{background:#ffdf80}}
 @media print{{details{{display:none}}}}
 </style>
 <h1>{html.escape(result.student_file.stem)}</h1>

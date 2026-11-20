@@ -10,6 +10,7 @@ from docx.oxml.ns import qn
 from docx.shared import Pt
 
 from Word.word_checker import (
+    _format_length,
     check_folder,
     compare_documents,
     reference_style_names,
@@ -55,6 +56,8 @@ class WordCheckerTests(unittest.TestCase):
         content = report.read_text(encoding="utf-8")
         self.assertIn("Geen verschillen gevonden; alle ingestelde punten zijn toegekend.", content)
         self.assertIn("Stijl: Standaard", content)
+        self.assertIn("<h2>Document opschonen <span class=\"score\">", content)
+        self.assertNotIn("<h2>Punten</h2>", content)
         self.assertLess(
             content.index("Document opschonen"),
             content.index("Stijl: Standaard"),
@@ -153,7 +156,13 @@ class WordCheckerTests(unittest.TestCase):
         document.paragraphs[0].style = "Title"
         document.save(self.student)
         result = compare_documents(self.reference, self.student)
-        self.assertIn("Stijldefinitie", [f.item for f in result.sections["Stijl: Standaard"]])
+        style_findings = result.sections["Stijl: Standaard"]
+        self.assertIn("Stijldefinitie — Grootte", [finding.item for finding in style_findings])
+        size_finding = next(
+            finding for finding in style_findings
+            if finding.item == "Stijldefinitie — Grootte"
+        )
+        self.assertEqual(size_finding.actual, "18 pt")
         self.assertIn(
             "Alinea 1 — toegepaste stijl",
             [f.item for f in result.sections["Stijlen op juiste alinea's"]],
@@ -162,6 +171,50 @@ class WordCheckerTests(unittest.TestCase):
             "Alinea 1 — toegepaste stijl",
             [f.item for f in result.sections["Stijl: Standaard"]],
         )
+
+    def test_style_lengths_accept_plain_integer_values(self):
+        self.assertEqual(_format_length(0, "cm"), "0 cm")
+        self.assertEqual(_format_length(12700, "pt"), "1 pt")
+
+    def test_double_spaces_are_grouped_and_locations_expand_on_demand(self):
+        self._make_document(self.student, text="Een  voorbeeld  tekst.")
+        result = compare_documents(self.reference, self.student)
+        findings = result.sections["Document opschonen"]
+        self.assertEqual(
+            [finding.item for finding in findings],
+            ["Alinea 1 — dubbele spaties"],
+        )
+
+        report = self.root / "report.html"
+        write_report(result, report)
+        content = report.read_text(encoding="utf-8")
+        self.assertIn("<th>Dubbele spaties (1 alinea)</th>", content)
+        self.assertIn(
+            "<summary>Toon de plaatsen met dubbele spaties</summary>",
+            content,
+        )
+        self.assertIn("Een<mark>  </mark>voorbeeld<mark>  </mark>tekst.", content)
+
+    def test_scores_are_shown_in_their_report_sections(self):
+        self._make_document(self.student)
+        result = compare_documents(self.reference, self.student)
+        report = self.root / "report.html"
+        write_report(
+            result,
+            report,
+            {"Document opschonen": 2, "Stijl: Standaard": 3},
+        )
+        content = report.read_text(encoding="utf-8")
+        cleanup_section = content[
+            content.index("<section><h2>Document opschonen"):
+            content.index("</section>", content.index("<section><h2>Document opschonen"))
+        ]
+        style_section = content[
+            content.index("<section><h2>Stijl: Standaard"):
+            content.index("</section>", content.index("<section><h2>Stijl: Standaard"))
+        ]
+        self.assertIn('data-maximum="2"', cleanup_section)
+        self.assertIn('data-maximum="3"', style_section)
 
     def test_title_style_hints_must_be_removed_during_cleanup(self):
         reference = Document()
